@@ -1,245 +1,90 @@
-# Kite
+# Kite distribution kit
 
-**Kite** is a native, ahead-of-time compiled programming language with
-Python-like readability and Rust/C-level performance potential. It compiles
-`.ki` source files straight to a native executable through LLVM.
+Tout ce qu'il faut pour distribuer `kite` : installateur GUI, scripts en
+ligne de commande, et site web d'installation pour Cloudflare Pages.
 
-```
-make main():
-    print("Hello, Kite!")
-```
+**Hypothèse à vérifier** : tous les fichiers ci-dessous supposent que le
+dépôt GitHub est `yo-le-zz/Kite` (constante `REPO` répétée dans chaque
+fichier). Si ce n'est pas le bon nom, remplace `yo-le-zz/Kite` partout où
+il apparaît (`grep -rn "yo-le-zz/Kite" .`) :
+- `installer/src/net.rs` (constante `REPO`)
+- `scripts/install.sh`, `scripts/install-macos.sh` (`KITE_REPO` par défaut)
+- `scripts/install.ps1` (`$Repo` par défaut)
+- `website/index.html` (lien "Releases GitHub")
 
-Kite is:
-
-- **Simple by default** -- indentation-based syntax, type inference, no
-  boilerplate.
-- **Safe by default** -- 1-based, bounds-checked collections; a strict,
-  static type checker; no undefined behavior on out-of-range access.
-- **Powerful when you need it** -- structs, growable lists, functions,
-  recursion, and a straight line down to LLVM IR and native machine code.
-
-This repository is the reference compiler: `kite`, written in Rust.
-
-> **Status:** v0.1.0. This is a real, working compiler with a full
-> pipeline (lexer -> parser -> semantic analysis -> IR -> LLVM codegen ->
-> native executable) -- not a toy or a mockup. It also has real, documented
-> limitations; see [`docs/roadmap.md`](docs/roadmap.md) for what's next.
-
----
-
-## Installation
-
-You'll need:
-
-- **Rust** (stable) and Cargo, to build the compiler itself.
-- **clang** (any recent LLVM/clang install) on your `PATH` -- Kite emits
-  LLVM IR text and shells out to `clang` to turn it into a native
-  executable and link it, the same way Rust shells out to a system linker.
-
-```bash
-git clone https://github.com/yo-le-zz/kite.git
-cd kite
-cargo build --release
-# put target/release/kite on your PATH, or run it directly:
-./target/release/kite --version
-```
-
-## Hello, World
-
-```bash
-kite init hello
-cd hello
-kite run
-```
-
-`kite init hello` scaffolds:
+## Arborescence
 
 ```
-hello/
-├── kite.toml
-└── src/
-    └── main.ki
+installer/          Installateur GUI (Rust + iced), copie enrichie de celui fourni
+  Cargo.toml         + ureq/tar/flate2/zip pour télécharger et extraire la vraie release
+  src/main.rs         Assistant en 4 étapes : Bienvenue → Options → Progression → Terminé
+  src/net.rs          Résout la dernière release GitHub, télécharge l'asset pour l'OS/arch
+  src/archive.rs       Extrait le binaire kite d'un .tar.gz ou .zip
+  build.sh             Cross-compile l'installateur (11 cibles), package .tar.gz/.zip/.deb
+  assets/              Logos/icônes (inchangés)
+
+scripts/             Scripts d'installation en une commande
+  install.sh           Linux : curl -fsSL .../install.sh | sh
+  install-macos.sh      macOS : gère aussi la quarantaine Gatekeeper
+  install.ps1            Windows : irm .../install.ps1 | iex
+
+website/             Site statique à déployer sur Cloudflare Pages
+  index.html, style.css, script.js   Page avec onglets Windows/Linux/macOS + commande à copier
+  install.sh / install-macos.sh / install.ps1   copies statiques, servies telles quelles
+  functions/install.js                Endpoint dynamique GET /install?os=... (Pages Function)
 ```
 
-with `src/main.ki` containing:
+## Vérifications déjà faites ici
 
-```
-make main():
-    print("Hello, Kite!")
-```
+- `bash -n` / `dash -n` sur tous les `.sh` → syntaxe OK.
+- `node --check` sur `script.js` et `functions/install.js` → syntaxe OK.
+- Pas de toolchain Rust dans cet environnement, donc **`installer/` n'a
+  pas été compilé de mon côté** — un build réel chez toi a confirmé que
+  8/10 cibles passent, avec deux limites structurelles (voir ci-dessous).
+  Point encore à surveiller si `iced` râle : les appels
+  `.center_x(Length::Fill)` / `.center_y(Length::Fill)` sur
+  `container(...)` dans `src/main.rs` (`view_welcome`, `view_progress`,
+  `view_done`) — si ta version d'iced 0.13 n'a pas cette méthode avec cet
+  argument, remplace par `.width(Length::Fill).height(Length::Fill)`.
 
-`kite run` type-checks, compiles, links, and immediately executes it.
+## Limites connues de `installer/build.sh` (pas réparables depuis le script)
 
-## CLI
+- **macOS (`macos-x64`, `macos-arm64`)** : `cargo-zigbuild`/`zig` ne peuvent
+  pas linker `AppKit`/`Metal`/le runtime Objective-C (`libobjc`) — ce sont
+  des bibliothèques propriétaires Apple que zig n'embarque pas légalement.
+  Ça fonctionne pour `kite` (CLI pur, aucune dépendance GUI) mais pas pour
+  cet installateur GUI. **Solution : `.github/workflows/build-installer-macos.yml`**,
+  qui build sur de vrais runners `macos-13`/`macos-14` GitHub Actions et
+  produit les mêmes noms de fichiers que `build.sh` (`kite-installer-<version>-macos-<arch>.tar.gz`).
+  Déclenche-le manuellement (onglet Actions) ou en poussant un tag `v*`.
+- **`windows-arm64` (MSVC)** : retiré de la matrice de `installer/build.sh`.
+  `ring` (tiré par `ureq`→`rustls` pour le téléchargement HTTPS) casse sous
+  `cargo-xwin` pour cette cible précise (bug d'interaction clang-cl/`/imsvc`,
+  pas un problème de config). `kite`'s propre `build.sh` n'a pas ce souci
+  (pas de dépendance `ureq`) et build `windows-arm64` normalement. Pour
+  l'installateur sur cette cible, il faut soit une vraie machine
+  Windows-on-ARM avec MSVC, soit attendre un correctif upstream de
+  `cargo-xwin`/`ring`.
 
-| Command | What it does |
-|---|---|
-| `kite init [name]` | Scaffold a new project (or the current directory if `name` is omitted) |
-| `kite build [--release] [--target <triple>]` | Compile `src/main.ki` to `target/<package>` |
-| `kite run` | Build, then immediately execute the result |
-| `kite check` | Type-check without producing an executable |
-| `kite clean` | Remove the `target/` directory |
-| `kite add <package>[@version]` | Add a dependency to `kite.toml` |
-| `kite remove <package>` | Remove a dependency |
-| `kite update` | Refresh `kite.lock` |
-| `kite --version` / `kite --help` | The usual |
 
-## Language tour
+## Comment ça s'articule
 
-### Variables -- inferred by default, annotated if you want
+1. `kite`'s propre `build.sh` (déjà livré précédemment) publie
+   `kite-<version>-<os>-<arch>.tar.gz/.zip` et `kite_<version>_<arch>.deb`
+   comme assets de la release GitHub.
+2. `installer/` (le GUI) et `scripts/*.sh|ps1` téléchargent ces mêmes
+   assets par leur nom exact — aucun changement de convention de nommage
+   entre les deux `build.sh`.
+3. `website/` affiche la commande à copier selon l'OS, et sert aussi les
+   scripts bruts en statique (+ un endpoint `/install?os=...` qui fait la
+   même chose dynamiquement).
 
-```
-age = 20                 // inferred: int
-name = "Kite"            // inferred: string
-active = true            // inferred: bool
-pi: float = 3.14         // explicit annotation
-```
+## Déployer le site sur Cloudflare Pages
 
-Reassigning a name later must keep its original type -- Kite is inferred,
-not untyped.
-
-### Functions
-
-```
-make add(a: int, b: int) -> int:
-    return a + b
-
-// Return type can be omitted and inferred from `return` statements:
-make double(x: int):
-    return x * 2
-```
-
-### Control flow
-
-```
-if age >= 18:
-    print("adult")
-orif age >= 13:
-    print("teen")
-else:
-    print("child")
-```
-
-### Loops
-
-```
-until age >= 18:          // loops *while the condition is false*
-    age = age + 1
-
-infinit:                  // unconditional loop
-    tries = tries + 1
-    if tries >= 3:
-        break
-
-for i = 1 to 10:           // inclusive counting loop
-    print(i)
-
-for item in numbers:       // iterate a list
-    print(item)
-```
-
-### Collections -- **1-indexed**
-
-```
-numbers = [10, 20, 30]
-numbers[1]                 // 10 -- Kite lists start at 1, not 0
-
-append(numbers, 40)        // lists are growable (backed by a heap buffer)
-len(numbers)                // 4
-
-point = (10, 20)            // tuples
-point[1]                    // 10
-
-user = {                    // dictionaries (fixed, compile-time-known keys in v0.1)
-    "name": "Bob",
-    "age": 20,
-}
-user["name"]
-```
-
-### Structs
-
-```
-type User:
-    name: string
-    age: int
-
-user = User()
-user.name = "Bob"
-user.age = 20
-```
-
-### Imports
-
-```
-use math
-from collections import sort
-```
-
-(Parsed and type-checked in v0.1; not yet linked against a real standard
-library -- see [`docs/roadmap.md`](docs/roadmap.md).)
-
-### Error handling
-
-```
-try:
-    result = 10 / divisor
-    return result
-failed error:
-    print(error)
-finally:
-    print("cleanup")
-```
-
-`finally` is guaranteed to run, even if `try` exits early via `return`,
-`break`, or `continue`. There is no runtime error/exception type in v0.1
-yet, so `failed` is type-checked but not currently reachable -- see the
-roadmap.
-
-### Concurrency (scaffolding)
-
-```
-async make download() -> int:
-    return 42
-
-make main():
-    thread:
-        do_background_work()
-    result = await download()
-```
-
-`thread` and `async`/`await` parse and type-check today; v0.1 runs both
-**synchronously** (no real OS threads or async runtime yet). This is
-explicit, documented scaffolding, not a hidden limitation -- see the
-roadmap for what real concurrency support will look like.
-
-## Package manager
-
-```bash
-kite add http@1.2.0
-kite remove http
-kite update
-```
-
-These manage `kite.toml`'s `[dependencies]` table and a `kite.lock`
-snapshot. There is no package registry to resolve against yet in v0.1 --
-`kite build` does not fetch or compile dependency sources. See
-[`docs/roadmap.md`](docs/roadmap.md).
-
-## Documentation
-
-- [`docs/architecture.md`](docs/architecture.md) -- how the compiler is built, stage by stage.
-- [`docs/roadmap.md`](docs/roadmap.md) -- what's implemented today, and what's next.
-
-## Development
-
-```bash
-cargo build          # build the compiler
-cargo test           # lexer / parser / sema / codegen / LLVM backend / CLI tests
-cargo fmt            # format
-cargo clippy         # lint
-```
-
-## License
-
-MIT -- see [`LICENSE`](LICENSE).
+1. Pousse le dossier `website/` (tel quel, à la racine du dépôt Pages) sur
+   GitHub, ou utilise `wrangler pages deploy website/`.
+2. Aucune configuration de build n'est nécessaire (site 100% statique +
+   une Function) — output directory = `website/`.
+3. Une fois déployé, remplace les URLs `https://kite-lang.pages.dev/...`
+   dans `index.html`, `script.js` et les 3 scripts par ton domaine réel
+   si différent.

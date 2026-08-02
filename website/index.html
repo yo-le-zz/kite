@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="fr">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Kite — Installation</title>
+<meta name="description" content="Installe Kite en une commande, sur Windows, Linux ou macOS.">
+<link rel="icon" href="/kite-32.png">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+  <main>
+    <header class="hero">
+      <div class="wordmark">
+        <img src="/kite-64.png" alt="" width="40" height="40">
+        <span>kite</span>
+      </div>
+      <p class="tagline">Compilateur &amp; CLI multiplateforme. Une commande, et c'est installé.</p>
+    </header>
+
+    <section class="installer" aria-label="Commande d'installation">
+      <div class="tabs" role="tablist" aria-label="Système d'exploitation">
+        <button class="tab" role="tab" data-os="linux" aria-selected="false">Linux</button>
+        <button class="tab" role="tab" data-os="macos" aria-selected="false">macOS</button>
+        <button class="tab" role="tab" data-os="windows" aria-selected="false">Windows</button>
+      </div>
+
+      <div class="terminal">
+        <div class="terminal-bar">
+          <span class="dot dot-r"></span><span class="dot dot-y"></span><span class="dot dot-g"></span>
+          <span class="terminal-title" id="terminal-title">linux — sh</span>
+        </div>
+        <div class="terminal-body">
+          <code id="command">curl -fsSL https://kite-lang.pages.dev/install.sh | sh</code>
+          <button id="copy-btn" aria-label="Copier la commande">Copier</button>
+        </div>
+      </div>
+
+      <p class="hint" id="hint">
+        Installe dans <code>~/.local/bin</code>. Nécessite <code>curl</code> et <code>tar</code>.
+      </p>
+    </section>
+
+    <section class="alt">
+      <h2>Autres méthodes</h2>
+      <ul>
+        <li><a href="/install.sh">install.sh</a> — script brut, pour Linux</li>
+        <li><a href="/install-macos.sh">install-macos.sh</a> — script brut, pour macOS</li>
+        <li><a href="/install.ps1">install.ps1</a> — script brut, pour Windows</li>
+        <li><a href="https://github.com/yo-le-zz/Kite/releases/latest">Releases GitHub</a> — .deb, .zip, binaires bruts pour chaque OS/architecture</li>
+      </ul>
+    </section>
+
+    <footer>
+      <a href="https://github.com/yo-le-zz/Kite">github.com/yo-le-zz/Kite</a>
+    </footer>
+  </main>
+
+  <script src="/script.js"></script>
+</body>
+</html>
