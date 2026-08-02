@@ -1,0 +1,45 @@
+[package]
+name = "kite"
+version = "0.1.0"
+edition = "2021"
+authors = ["yo-le-zz"]
+description = "The Kite programming language: compiler and CLI"
+license = "MIT"
+repository = "https://github.com/yo-le-zz/kite"
+default-run = "kite"
+
+# The compiler is built as a library (`kite`) plus a thin binary so that
+# every pipeline stage (lexer, parser, sema, ir, codegen) can be exercised
+# directly from the integration test suite in `tests/`, without going
+# through the CLI.
+[lib]
+name = "kite"
+path = "src/lib.rs"
+
+[[bin]]
+name = "kite"
+path = "src/main.rs"
+
+[dependencies]
+clap = { version = "=4.4.18", features = ["derive"] }
+colored = "2"
+anyhow = "1"
+thiserror = "1"
+serde = { version = "1", features = ["derive"] }
+toml = "=0.8.2"
+
+# Transitive-dependency pins: the system Rust toolchain here is 1.75,
+# which predates Cargo's `edition2024` feature. Several crates bumped a
+# transitive dependency (indexmap, hashbrown) to a release that requires
+# `edition2024` well after their own semver-compatible range would allow,
+# so we pin them directly to stay buildable on stable 1.75.
+indexmap = "=2.2.6"
+hashbrown = "=0.14.5"
+
+[dev-dependencies]
+assert_cmd = "=2.0.14"
+predicates = "=3.1.0"
+tempfile = "=3.10.1"
+
+[profile.release]
+opt-level = 3

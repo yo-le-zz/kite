@@ -1,0 +1,6 @@
+// time -- clocks, durations, sleeping.
+//
+// Planned surface (not yet implemented / not yet linkable):
+//
+//   now() -> int          unix timestamp, seconds
+//   sleep(seconds: int)

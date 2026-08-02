@@ -1,0 +1,12 @@
+// `finally` always runs -- even when `try` exits early via `return`.
+make safe_divide(a: int, b: int) -> int:
+    result = 0
+    try:
+        result = a / b
+        return result
+    finally:
+        print("cleanup ran")
+    return -1
+
+make main():
+    print(safe_divide(10, 2))

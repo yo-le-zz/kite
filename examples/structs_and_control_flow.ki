@@ -1,0 +1,18 @@
+type User:
+    name: string
+    age: int
+
+make classify(age: int) -> string:
+    if age >= 18:
+        return "adult"
+    orif age >= 13:
+        return "teen"
+    else:
+        return "child"
+
+make main():
+    user = User()
+    user.name = "Bob"
+    user.age = 20
+    print(user.name)
+    print(classify(user.age))

@@ -1,0 +1,5 @@
+// json -- parsing and serializing JSON.
+//
+// Planned surface (not yet implemented / not yet linkable). Blocked on
+// v0.2's dynamic/tagged value type, since JSON values are heterogeneous
+// in a way v0.1's scalar-only aggregates can't represent yet.

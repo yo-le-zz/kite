@@ -1,0 +1,123 @@
+name: CI
+
+# Runs on every push and pull request, and can also be triggered manually
+# from the Actions tab.
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  test:
+    name: fmt, clippy, build & test (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable, with rustfmt + clippy)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      # `kite` shells out to `clang` to turn its generated LLVM IR into a
+      # native executable -- this is what the LLVM backend tests and CLI
+      # `build`/`run` tests actually exercise, so CI needs it installed
+      # too. Both ubuntu-latest and macos-latest ship a usable `clang`,
+      # but we install/verify explicitly so a missing toolchain fails
+      # loudly instead of silently skipping those tests.
+      - name: Install clang (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Verify clang is available
+        run: clang --version
+
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+
+      - name: Run clippy (deny warnings)
+        run: cargo clippy --all-targets --all-features -- -D warnings
+
+      - name: Build
+        run: cargo build --all-targets --verbose
+
+      - name: Run the full test suite
+        run: cargo test --all-targets --verbose
+
+      - name: Doc-check (catch broken doc comments)
+        run: cargo doc --no-deps --document-private-items
+
+  # A couple of end-to-end smoke tests driven through the actual `kite`
+  # binary, on top of the `cargo test` suite above (which already covers
+  # this via tests/cli_tests.rs and tests/llvm_backend_tests.rs) -- kept
+  # here too so the CLI workflow is visible directly in the Actions log,
+  # not just buried inside `cargo test` output.
+  smoke-test:
+    name: kite init / build / run smoke test
+    runs-on: ubuntu-latest
+    needs: test
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust (stable)
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install clang
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y clang
+
+      - name: Build the kite binary
+        run: cargo build --release
+
+      - name: kite init
+        run: ./target/release/kite init smoke_test_project
+
+      - name: kite run
+        working-directory: smoke_test_project
+        run: "$GITHUB_WORKSPACE/target/release/kite run | tee output.txt"
+
+      - name: Verify hello-world output
+        working-directory: smoke_test_project
+        run: grep -q "Hello, Kite!" output.txt
+
+      - name: kite check on every example program
+        run: |
+          KITE="$GITHUB_WORKSPACE/target/release/kite"
+          for example in examples/*.ki; do
+            echo "== checking $example =="
+            mkdir -p /tmp/example_project/src
+            cp "$example" /tmp/example_project/src/main.ki
+            cat > /tmp/example_project/kite.toml <<'EOF'
+          [package]
+          name = "example_project"
+          version = "0.1.0"
+          edition = "2026"
+
+          [build]
+          opt_level = 0
+
+          [dependencies]
+          EOF
+            (cd /tmp/example_project && "$KITE" check)
+            rm -rf /tmp/example_project
+          done

@@ -1,0 +1,7 @@
+// io -- reading and writing beyond the `print` builtin.
+//
+// Planned surface (not yet implemented / not yet linkable):
+//
+//   read_line() -> string        read one line from stdin
+//   eprint(value)                print to stderr instead of stdout
+//   flush()                      flush stdout

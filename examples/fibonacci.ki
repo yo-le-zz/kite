@@ -1,0 +1,10 @@
+// Recursion, and a function whose return type is inferred from its
+// `return` statements rather than being written out explicitly.
+make fib(n: int) -> int:
+    if n < 2:
+        return n
+    return fib(n - 1) + fib(n - 2)
+
+make main():
+    for i = 1 to 10:
+        print(fib(i))

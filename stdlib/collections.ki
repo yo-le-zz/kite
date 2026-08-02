@@ -1,0 +1,8 @@
+// collections -- list/dict helpers beyond the `append`/`len` builtins.
+//
+// Planned surface (not yet implemented / not yet linkable):
+//
+//   sort(list)
+//   reverse(list)
+//   contains(list, value) -> bool
+//   keys(dict) -> [string]

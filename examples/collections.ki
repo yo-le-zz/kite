@@ -1,0 +1,16 @@
+// Lists are 1-indexed and growable.
+make main():
+    numbers = [10, 20, 30]
+    print(numbers[1])
+
+    append(numbers, 40)
+    print(len(numbers))
+
+    total = 0
+    for n in numbers:
+        total = total + n
+    print(total)
+
+    point = (10, 20)
+    print(point[1])
+    print(point[2])

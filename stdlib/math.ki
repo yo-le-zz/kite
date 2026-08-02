@@ -1,0 +1,11 @@
+// math -- numeric functions and constants.
+//
+// Planned surface (not yet implemented / not yet linkable):
+//
+//   PI: float
+//   E: float
+//   sqrt(x: float) -> float
+//   pow(base: float, exp: float) -> float
+//   abs(x: float) -> float
+//   floor(x: float) -> int
+//   ceil(x: float) -> int

@@ -1,0 +1,8 @@
+// fs -- file and directory operations.
+//
+// Planned surface (not yet implemented / not yet linkable):
+//
+//   read_file(path: string) -> string
+//   write_file(path: string, contents: string)
+//   exists(path: string) -> bool
+//   list_dir(path: string) -> [string]

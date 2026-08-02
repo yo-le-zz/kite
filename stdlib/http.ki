@@ -1,0 +1,6 @@
+// http -- a minimal HTTP client.
+//
+// Planned surface (not yet implemented / not yet linkable):
+//
+//   get(url: string) -> string
+//   post(url: string, body: string) -> string

@@ -1,0 +1,7 @@
+// system -- process/environment/OS information.
+//
+// Planned surface (not yet implemented / not yet linkable):
+//
+//   args() -> [string]
+//   env(name: string) -> string
+//   exit(code: int)
