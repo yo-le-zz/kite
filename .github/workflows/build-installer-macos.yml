@@ -22,10 +22,10 @@ jobs:
         include:
           - target: x86_64-apple-darwin
             short: macos-x64
-            runner: macos-13        # last Intel-native GitHub runner
+            runner: macos-15-intel   # macos-13 was fully retired Dec 2025
           - target: aarch64-apple-darwin
             short: macos-arm64
-            runner: macos-14        # Apple Silicon runner
+            runner: macos-15        # macos-14 entered deprecation July 2026
     runs-on: ${{ matrix.runner }}
     defaults:
       run:
