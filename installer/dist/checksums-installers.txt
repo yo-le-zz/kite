@@ -12,3 +12,5 @@ bced628a2c5cf36acb2a4d402ad9b0f2c026496e25d2b2d51c14d6e4cd0db7cc  linux/arm64/ki
 b0101556184c855cfc6c150df7691868a475e3a64ad94d9c3a7cc74c1bf136bc  linux/arm64-musl/kite-installer_0.1.0_arm64.deb
 1d49051d8c3c2f9269599dbac94017aea9bb336dcc6d064385df0535f17df114  windows/x64/kite-installer-0.1.0-windows-x64.zip
 eda7a0e11da202ae05e7124db63681238cab84ec8965e861b428c90240113790  windows/x86/kite-installer-0.1.0-windows-x86.zip
+dba624b5feb543ecfa5b1b9f73063f9cfd3350ec0319c4bc2d83ecdabf4f25f6  kite-installer-macos-arm64.zip
+832c5bb5ec08505214b31450fba40119e97fc1a2b4de327fb385be9161235b00  kite-installer-macos-x64.zip
