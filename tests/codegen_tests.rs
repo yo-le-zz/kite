@@ -23,6 +23,7 @@ fn compile_to_llvm_ir(source: &str) -> String {
     let ast_program = kite::ast::Program {
         imports: vec![],
         structs: typed.structs,
+        enums: typed.enums,
         functions: typed.functions,
     };
     let ir = lower_program(&ast_program);
@@ -30,6 +31,7 @@ fn compile_to_llvm_ir(source: &str) -> String {
         &ir,
         &CodegenOptions {
             target_triple: None,
+            freestanding: false,
         },
     )
 }

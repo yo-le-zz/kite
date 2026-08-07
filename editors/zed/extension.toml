@@ -1,0 +1,21 @@
+id = "kite"
+name = "Kite"
+version = "0.1.0"
+schema_version = 1
+authors = ["yo-le-zz"]
+description = "Syntax highlighting and language configuration for the Kite programming language"
+repository = "https://github.com/yo-le-zz/zed-kite"
+
+[grammars.kite]
+repository = "https://github.com/yo-le-zz/tree-sitter-kite"
+# Pin this to the exact commit SHA of the tree-sitter-kite release you
+# want Zed to build against -- see the "Publishing" section of
+# ../../docs/zed-extension-publishing.md for how to get one and why a
+# floating branch name won't work here.
+rev = "REPLACE_WITH_TREE_SITTER_KITE_COMMIT_SHA"
+
+[language_servers]
+# No language server yet -- see docs/roadmap.md ("no LSP" under
+# "Smaller, nearer-term items" in the main kite repository). This
+# section is left here, empty, as the place a future `kite-lsp` entry
+# would go.

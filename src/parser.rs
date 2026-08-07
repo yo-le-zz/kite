@@ -1,4 +1,4 @@
-//! Recursive-descent parser: turns a token stream into an [`ast::Program`].
+//! Recursive-descent parser: turns a token stream into an [`crate::ast::Program`].
 //!
 //! Blocks are delimited by `Indent`/`Dedent`/`Newline` tokens produced by
 //! the lexer's layout pass rather than braces, so the block-level grammar
@@ -29,6 +29,7 @@ impl Parser {
     pub fn parse_program(mut self) -> (Option<Program>, DiagnosticBag) {
         let mut imports = Vec::new();
         let mut structs = Vec::new();
+        let mut enums = Vec::new();
         let mut functions = Vec::new();
 
         self.skip_blank_newlines();
@@ -40,15 +41,20 @@ impl Parser {
                 TokenKind::Type => self.parse_struct_def().map(|s| {
                     structs.push(s);
                 }),
-                TokenKind::Async | TokenKind::Make => self.parse_function().map(|f| {
-                    functions.push(f);
+                TokenKind::Enum => self.parse_enum_def().map(|e| {
+                    enums.push(e);
                 }),
+                TokenKind::Async | TokenKind::Make | TokenKind::Extern => {
+                    self.parse_function().map(|f| {
+                        functions.push(f);
+                    })
+                }
                 _ => {
                     let span = self.peek_span();
                     self.diagnostics.push(Diagnostic::error(
                         "E0010",
                         format!(
-                            "expected `use`, `from`, `type`, or `make`, found {}",
+                            "expected `use`, `from`, `type`, `enum`, `extern`, or `make`, found {}",
                             self.peek()
                         ),
                         span,
@@ -70,6 +76,7 @@ impl Parser {
                 Some(Program {
                     imports,
                     structs,
+                    enums,
                     functions,
                 })
             },
@@ -131,7 +138,9 @@ impl Parser {
         while !self.at(TokenKind::Eof)
             && !self.at(TokenKind::Make)
             && !self.at(TokenKind::Async)
+            && !self.at(TokenKind::Extern)
             && !self.at(TokenKind::Type)
+            && !self.at(TokenKind::Enum)
             && !self.at(TokenKind::Use)
             && !self.at(TokenKind::From)
         {
@@ -220,6 +229,42 @@ impl Parser {
         })
     }
 
+    fn parse_enum_def(&mut self) -> PResult<EnumDef> {
+        let start = self.expect(TokenKind::Enum)?.span;
+        let name = self.expect_identifier_text()?;
+        self.expect(TokenKind::Colon)?;
+        self.expect(TokenKind::Newline)?;
+        self.expect(TokenKind::Indent)?;
+
+        let mut variants = Vec::new();
+        while !self.at(TokenKind::Dedent) && !self.at(TokenKind::Eof) {
+            if self.at(TokenKind::Newline) {
+                self.advance();
+                continue;
+            }
+            let variant_tok = self.expect_identifier()?;
+            self.expect(TokenKind::Newline)?;
+            variants.push(EnumVariant {
+                name: ident_text(&variant_tok),
+                span: variant_tok.span,
+            });
+        }
+        let end = self.expect(TokenKind::Dedent)?.span;
+
+        if variants.is_empty() {
+            self.diagnostics.push(
+                Diagnostic::error("E0068", format!("enum `{name}` has no variants"), start.to(end))
+                    .with_help("an enum needs at least one variant, e.g. `enum Color:\\n    Red\\n    Green\\n    Blue`"),
+            );
+        }
+
+        Ok(EnumDef {
+            name,
+            variants,
+            span: start.to(end),
+        })
+    }
+
     fn parse_type(&mut self) -> PResult<TypeName> {
         let span = self.peek_span();
         let ty = match self.peek().clone() {
@@ -244,6 +289,12 @@ impl Parser {
     // ---- functions ------------------------------------------------------------
 
     fn parse_function(&mut self) -> PResult<Function> {
+        let is_extern = if self.at(TokenKind::Extern) {
+            self.advance();
+            true
+        } else {
+            false
+        };
         let is_async = if self.at(TokenKind::Async) {
             self.advance();
             true
@@ -281,6 +332,24 @@ impl Parser {
             None
         };
 
+        if is_extern {
+            // `extern make name(params) [-> type]` -- a declaration with
+            // no Kite body, implemented elsewhere (typically C) and
+            // linked in at build time. Ends at the newline; no `:` and
+            // no indented block.
+            let end = self.expect(TokenKind::Newline)?.span;
+            let span = start.to(end);
+            return Ok(Function {
+                name,
+                params,
+                declared_return_type,
+                is_async,
+                is_extern: true,
+                body: None,
+                span,
+            });
+        }
+
         self.expect(TokenKind::Colon)?;
         let body = self.parse_block()?;
         let span = start.to(body.span);
@@ -290,7 +359,8 @@ impl Parser {
             params,
             declared_return_type,
             is_async,
-            body,
+            is_extern: false,
+            body: Some(body),
             span,
         })
     }

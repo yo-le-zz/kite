@@ -1,0 +1,25 @@
+{
+  "$schema": "https://tree-sitter.github.io/tree-sitter/assets/schemas/config.schema.json",
+  "grammars": [
+    {
+      "name": "kite",
+      "camelcase": "Kite",
+      "scope": "source.kite",
+      "path": ".",
+      "file-types": ["ki"],
+      "highlights": "queries/highlights.scm",
+      "injection-regex": "^kite$"
+    }
+  ],
+  "metadata": {
+    "version": "0.1.0",
+    "license": "MIT",
+    "description": "Tree-sitter grammar for the Kite programming language",
+    "authors": [
+      { "name": "yo-le-zz" }
+    ],
+    "links": {
+      "repository": "https://github.com/yo-le-zz/tree-sitter-kite"
+    }
+  }
+}

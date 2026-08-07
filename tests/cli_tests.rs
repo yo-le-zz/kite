@@ -188,3 +188,78 @@ fn build_and_run_hello_world_end_to_end() {
         .success()
         .stdout(contains("Hello, Kite!"));
 }
+
+#[test]
+fn build_freestanding_produces_object_file_without_requiring_main() {
+    if !Command::new("clang")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("skipping: clang not found on PATH");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    kite()
+        .current_dir(dir.path())
+        .args(["init", "hello"])
+        .assert()
+        .success();
+    let project = dir.path().join("hello");
+    std::fs::write(
+        project.join("src/main.ki"),
+        "make add(a: int, b: int) -> int:\n    return a + b\n",
+    )
+    .unwrap();
+
+    kite()
+        .current_dir(&project)
+        .args(["build", "--freestanding"])
+        .assert()
+        .success();
+    assert!(project.join("target/hello.o").is_file());
+}
+
+#[test]
+fn quiet_flag_suppresses_progress_output() {
+    let dir = tempdir().unwrap();
+    kite()
+        .current_dir(dir.path())
+        .args(["init", "hello"])
+        .assert()
+        .success();
+    let project = dir.path().join("hello");
+    kite()
+        .current_dir(&project)
+        .args(["check", "--quiet"])
+        .assert()
+        .success()
+        .stdout(predicates::str::is_empty());
+}
+
+#[test]
+fn bench_reports_statistics() {
+    if !Command::new("clang")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+    {
+        eprintln!("skipping: clang not found on PATH");
+        return;
+    }
+    let dir = tempdir().unwrap();
+    kite()
+        .current_dir(dir.path())
+        .args(["init", "hello"])
+        .assert()
+        .success();
+    let project = dir.path().join("hello");
+    kite()
+        .current_dir(&project)
+        .args(["bench", "--runs", "3"])
+        .assert()
+        .success()
+        .stdout(contains("Average:"));
+}

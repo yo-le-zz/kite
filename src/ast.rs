@@ -29,6 +29,11 @@ pub enum TypeName {
     Tuple(Vec<TypeName>),
     /// A named struct type declared with `type Name: ...`.
     Struct(String),
+    /// A named enum type declared with `enum Name: ...`. Represented at
+    /// runtime as a plain `int` tag (variant declaration order, starting
+    /// at 0) -- printing an enum value shows that numeric tag in v0.1;
+    /// string variant names at runtime are a v0.2 roadmap item.
+    Enum(String),
     /// A dictionary literal's type: v0.1 dictionaries have a fixed,
     /// compile-time-known set of string keys (inferred from the literal
     /// that created them) each with their own value type -- structurally
@@ -59,6 +64,7 @@ impl std::fmt::Display for TypeName {
                 write!(f, ")")
             }
             TypeName::Struct(name) => write!(f, "{name}"),
+            TypeName::Enum(name) => write!(f, "{name}"),
             TypeName::Dict(fields) => {
                 write!(f, "{{")?;
                 for (i, (k, v)) in fields.iter().enumerate() {
@@ -78,6 +84,7 @@ impl std::fmt::Display for TypeName {
 pub struct Program {
     pub imports: Vec<Import>,
     pub structs: Vec<StructDef>,
+    pub enums: Vec<EnumDef>,
     pub functions: Vec<Function>,
 }
 
@@ -108,6 +115,19 @@ pub struct StructDef {
 }
 
 #[derive(Debug, Clone)]
+pub struct EnumVariant {
+    pub name: String,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct EnumDef {
+    pub name: String,
+    pub variants: Vec<EnumVariant>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
 pub struct Param {
     pub name: String,
     pub ty: TypeName,
@@ -119,10 +139,20 @@ pub struct Function {
     pub name: String,
     pub params: Vec<Param>,
     /// `None` means the return type is inferred from the function's
-    /// `return` statements (unit if there are none).
+    /// `return` statements (unit if there are none). Always required
+    /// (never inferred) for `extern` declarations, since there's no body
+    /// to infer it from.
     pub declared_return_type: Option<TypeName>,
     pub is_async: bool,
-    pub body: Block,
+    /// True for `extern make name(...):` -- a declaration of a function
+    /// implemented elsewhere (in C, or any other object file linked in
+    /// at build time) with no Kite body. See `ast::Program::externs`...
+    /// actually stored inline here: `body` is `None` exactly when this
+    /// is true.
+    pub is_extern: bool,
+    /// `None` for an `extern` declaration (no Kite implementation);
+    /// `Some` for every ordinary function.
+    pub body: Option<Block>,
     pub span: Span,
 }
 

@@ -163,3 +163,45 @@ fn and_or_require_bool_operands() {
     let errors = check_err("make main():\n    x = 1 and 2\n");
     assert!(errors.iter().any(|e| e.contains("bool")));
 }
+
+#[test]
+fn extern_function_can_be_called() {
+    check_ok("extern make c_add(a: int, b: int) -> int\n\nmake main():\n    print(c_add(1, 2))\n");
+}
+
+#[test]
+fn extern_function_call_type_checks_arguments() {
+    let errors = check_err(
+        "extern make c_add(a: int, b: int) -> int\n\nmake main():\n    print(c_add(1, \"oops\"))\n",
+    );
+    assert!(!errors.is_empty());
+}
+
+#[test]
+fn enum_variants_type_check() {
+    check_ok(
+        "enum Color:\n    Red\n    Green\n    Blue\n\nmake main():\n    c = Color.Red\n    print(c == Color.Blue)\n",
+    );
+}
+
+#[test]
+fn enum_unknown_variant_is_an_error() {
+    let errors = check_err("enum Color:\n    Red\n\nmake main():\n    c = Color.Purple\n");
+    assert!(errors.iter().any(|e| e.contains("no variant")));
+}
+
+#[test]
+fn enum_and_struct_with_same_name_is_an_error() {
+    let errors =
+        check_err("type Color:\n    x: int\n\nenum Color:\n    Red\n\nmake main():\n    return\n");
+    assert!(errors
+        .iter()
+        .any(|e| e.contains("both a struct and an enum")));
+}
+
+#[test]
+fn enum_used_as_function_parameter_type_checks() {
+    check_ok(
+        "enum Color:\n    Red\n    Green\n\nmake is_red(c: Color) -> bool:\n    return c == Color.Red\n\nmake main():\n    print(is_red(Color.Red))\n",
+    );
+}

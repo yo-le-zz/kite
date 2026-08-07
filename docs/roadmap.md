@@ -14,16 +14,25 @@ the honest list of what's implemented today versus what's next.
 - `if`/`orif`/`else`, `until`, `infinit`, `for ... = ... to ...`,
   `for ... in ...`, `break`, `continue`.
 - Growable, 1-indexed lists (`append`, `len`), fixed-arity tuples,
-  compile-time-fixed-key dictionaries, and structs -- all restricted to
-  scalar elements/fields and local-only (see
+  compile-time-fixed-key dictionaries, structs, and C-style enums -- all
+  restricted to scalar elements/fields and local-only (see
   [`docs/architecture.md`](architecture.md) for why).
 - Runtime bounds checking on list access (safe abort, not undefined
   behavior).
 - `try`/`failed`/`finally` parses and type-checks; `finally` is
   guaranteed to run on early `return`/`break`/`continue` out of `try`.
 - `thread`/`async`/`await` parse, type-check, and run **synchronously**.
-- `use`/`from ... import` parse and type-check as no-ops.
-- A Cargo-style CLI (`init`/`build`/`run`/`check`/`clean`) and a
+- Real multi-file, multi-directory projects: `use`/`from ... import`
+  resolve against files under `src/`, with diagnostics attributed back
+  to the file they actually came from.
+- Two-way C interop: `extern make ...` declarations to call C from Kite,
+  `kite build --link` to link it in, and `kite build --lib` (with a
+  generated C header) to call Kite from C -- see
+  [`docs/c-interop.md`](c-interop.md). Also `--freestanding` for
+  no-hosted-runtime builds (OS/kernel code) and `--static` for
+  statically linked executables.
+- A Cargo-style CLI (`init`/`build`/`run`/`check`/`clean`/`bench`) with
+  `--quiet`, custom output paths (`-o`/`--out-dir`), and a
   Cargo-inspired package manager (`add`/`remove`/`update`) that manages
   `kite.toml`/`kite.lock` locally.
 - A full test suite: lexer, parser, semantic analysis, codegen (IR shape),
@@ -90,17 +99,23 @@ needs:
 - Dependency graph resolution (version constraint solving).
 - A local cache (`.kite-cache/` is already scaffolded) that's actually
   populated, plus compiling dependency sources as part of `kite build`.
-- Once functions/aggregates can cross module boundaries (see above), a
-  real multi-file **module system**, since `use`/`from ... import`
-  currently have nothing to resolve against.
+- **Per-symbol visibility and qualified calls.** `use`/`from ... import`
+  already resolve against real files under `src/` (see the top of this
+  page), but every function/struct in an imported file becomes visible
+  under its own bare name -- there's no `pub`/private distinction and no
+  `module.function()` qualified-call syntax yet. Both matter more once
+  imports can also come from a downloaded *dependency* rather than only
+  your own project's files, to avoid two dependencies' functions
+  colliding by name.
 
 ## v0.2: a real standard library
 
 `stdlib/` is currently a design scaffold (see `stdlib/README.md`) -- each
 `.ki` file sketches an intended API surface as comments, not working code.
 Implementing `io`/`fs`/`math`/`json`/`http`/`time`/`collections`/`system`
-for real is downstream of the module system and (for `json`/`http`) the
-dynamic value representation above.
+for real is downstream of the package-manager work above (so they can be
+distributed as an installable package) and (for `json`/`http`) the
+dynamic value representation mentioned earlier on this page.
 
 ## Smaller, nearer-term items
 
@@ -109,10 +124,29 @@ dynamic value representation above.
   friendly).
 - `elif`-style chained conditions already work (`orif`), but pattern
   matching (`match`/`switch`) doesn't exist yet.
-- No generics: every function and struct is fully concrete.
+- No generics: every function and struct is fully concrete. Real generic
+  functions (`make max<T>(a: T, b: T) -> T:`) need monomorphization, and
+  are the natural unlock for generic collections/algorithms once the
+  aggregate-passing restriction above is also lifted.
 - No modules/visibility system within a single file beyond "everything
   is public."
+- No incremental compilation: every `kite build` recompiles every file
+  in the project from scratch, however small the change. A real build
+  cache (keyed on file content/mtime, à la Cargo's) is a roadmap item.
 - LLVM optimization passes aren't run beyond whatever `clang -O<n>`
   applies to the generated `.ll` as a whole; Kite doesn't yet run its own
   IR-level optimization passes (constant folding, dead-code elimination,
   inlining) before handing off to LLVM.
+- No low-level/manual memory control (`alloc`/`free`, raw pointers) or
+  an `unsafe` block for it -- today the only heap allocation is the one
+  growable-list implementation detail, entirely managed by the compiler.
+  A real systems-programming story here needs a deliberate design (an
+  ownership model, or a much simpler "you asked for `unsafe`, you own
+  the consequences" escape hatch) rather than a bolted-on `alloc<T>()`.
+- No SIMD/vector types.
+- No developer tooling beyond the compiler itself: no `kite fmt`
+  (formatter), `kite lint`, `kite doc` (doc-comment extraction), a
+  built-in `kite test` framework, or an LSP (editor auto-completion,
+  inline errors, go-to-definition). A syntax-highlighting setup for Zed
+  (tree-sitter grammar + extension) exists under `editors/zed/` as a
+  starting point for editor tooling more broadly -- see its own README.

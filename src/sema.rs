@@ -6,7 +6,8 @@
 //! - infers types for `name = expr` bindings (and checks explicit
 //!   `name: Type = expr` annotations against them),
 //! - infers function return types from `return` statements when no
-//!   explicit `-> Type` is written (see [`infer_return_type`] docs),
+//!   explicit `-> Type` is written (see `Analyzer::check_function` for
+//!   how inference is locked in, in source order),
 //! - type-checks expressions, collection indexing (1-based, with
 //!   compile-time bounds checks wherever the index is a literal),
 //!   struct field access, and function call arity/argument types,
@@ -25,6 +26,7 @@ use std::collections::HashMap;
 #[derive(Debug, Clone)]
 pub struct TypedProgram {
     pub structs: Vec<StructDef>,
+    pub enums: Vec<EnumDef>,
     pub functions: Vec<Function>,
 }
 
@@ -37,7 +39,7 @@ struct VarInfo {
 struct FnSig {
     params: Vec<TypeName>,
     /// `None` while this function's return type is still being inferred
-    /// (see [`infer_return_type`]); always `Some` once analysis of that
+    /// (see the return-type-inference docs on `Analyzer::check_function`); always `Some` once analysis of that
     /// function completes.
     return_type: Option<TypeName>,
 }
@@ -49,17 +51,20 @@ struct Scope {
 /// Shared, mutable tables consulted (and, for return types, updated) while
 /// checking every function -- wrapped in `RefCell` so that checking
 /// function `B` can observe a return type that function `A` locked in
-/// earlier in the same pass (see [`infer_return_type`]).
+/// earlier in the same pass.
 struct Tables {
     functions: RefCell<HashMap<String, FnSig>>,
     structs: HashMap<String, Vec<(String, TypeName)>>,
+    /// enum name -> variant names, in declaration order (their index is
+    /// the runtime `int` tag -- see `TypeName::Enum`).
+    enums: HashMap<String, Vec<String>>,
 }
 
 struct Analyzer<'a> {
     tables: &'a Tables,
     scopes: Vec<Scope>,
     /// The return type of the function currently being checked. `None`
-    /// means it is still being inferred (see [`Self::check_return_expr`]).
+    /// means it is still being inferred (see [`Self::check_return`]).
     current_fn: String,
     current_return_type: Option<TypeName>,
     /// Set when a `return <recursive self-call>` was skipped for
@@ -120,6 +125,11 @@ impl<'a> Analyzer<'a> {
     }
 
     fn check_function(&mut self, func: &Function) {
+        if func.is_extern {
+            // No body to check; the signature was already validated and
+            // registered when building the function table.
+            return;
+        }
         self.push_scope();
         self.current_fn = func.name.clone();
         self.current_return_type = self
@@ -133,7 +143,11 @@ impl<'a> Analyzer<'a> {
             self.declare(&param.name, param.ty.clone());
         }
 
-        let falls_through = self.check_block(&func.body);
+        let body = func
+            .body
+            .as_ref()
+            .expect("non-extern function always has a body");
+        let falls_through = self.check_block(body);
 
         // If we finished the whole body and still don't know the return
         // type: either nothing ever returned a value (a genuine `Void`
@@ -513,6 +527,22 @@ impl<'a> Analyzer<'a> {
                     .unwrap_or(TypeName::Int)
             }
             Expr::Field { base, field, span } => {
+                // `EnumName.Variant` -- the base is a *type* name, not a
+                // variable, so it must be resolved before falling back to
+                // the normal (struct instance) field-access path, which
+                // would otherwise report "cannot find variable EnumName".
+                if let Expr::Identifier(name, _) = base.as_ref() {
+                    if let Some(variants) = self.tables.enums.get(name) {
+                        if !variants.iter().any(|v| v == field) {
+                            self.error(
+                                "E0072",
+                                format!("enum `{name}` has no variant `{field}`"),
+                                *span,
+                            );
+                        }
+                        return TypeName::Enum(name.clone());
+                    }
+                }
                 let base_ty = self.check_expr(base);
                 self.resolve_field(&base_ty, field, *span)
                     .unwrap_or(TypeName::Int)
@@ -919,7 +949,7 @@ impl<'a> Analyzer<'a> {
 fn is_scalar(ty: &TypeName) -> bool {
     matches!(
         ty,
-        TypeName::Int | TypeName::Float | TypeName::Bool | TypeName::String
+        TypeName::Int | TypeName::Float | TypeName::Bool | TypeName::String | TypeName::Enum(_)
     )
 }
 
@@ -952,9 +982,95 @@ fn op_symbol(op: BinOp) -> &'static str {
     }
 }
 
-/// Runs semantic analysis over an entire program.
+/// Runs semantic analysis over an entire (single-file) program.
 pub fn analyze(program: &Program) -> (Option<TypedProgram>, DiagnosticBag) {
+    analyze_impl(program, |_name| None, true)
+}
+
+/// Runs semantic analysis over a program merged from multiple files (see
+/// `driver.rs`'s multi-file loader), attributing each function's and
+/// struct's own diagnostics back to the file it was actually declared in
+/// -- `origins` maps a function or struct name to `(filename, source
+/// text)`. Whole-program diagnostics that aren't about one specific
+/// function/struct (duplicate definitions, a missing `main`) render
+/// against whichever file the driver treats as "primary" (the entry
+/// file), same as before.
+pub fn analyze_multi_file(
+    program: &Program,
+    origins: &HashMap<String, (String, String)>,
+) -> (Option<TypedProgram>, DiagnosticBag) {
+    analyze_impl(program, |name| origins.get(name).cloned(), true)
+}
+
+/// Like [`analyze_multi_file`], but for `kite build --freestanding`:
+/// freestanding code is a library of functions meant to be linked into
+/// another (typically C/kernel) build, not a standalone program, so it
+/// doesn't need a `make main():` entry point.
+pub fn analyze_multi_file_freestanding(
+    program: &Program,
+    origins: &HashMap<String, (String, String)>,
+) -> (Option<TypedProgram>, DiagnosticBag) {
+    analyze_impl(program, |name| origins.get(name).cloned(), false)
+}
+
+fn analyze_impl(
+    program: &Program,
+    origin_of: impl Fn(&str) -> Option<(String, String)>,
+    require_main: bool,
+) -> (Option<TypedProgram>, DiagnosticBag) {
     let mut diagnostics = DiagnosticBag::new();
+
+    // Pass 0: enum tables, then rewrite every type annotation the parser
+    // wrote as `TypeName::Struct(name)` (its default guess for *any*
+    // bare identifier in type position, since the grammar can't tell a
+    // struct name from an enum name apart without a symbol table) into
+    // `TypeName::Enum(name)` wherever `name` actually names an enum. This
+    // gives every later pass (including IR lowering, which re-derives
+    // types structurally from this rewritten AST) an unambiguous type.
+    let mut enum_variants = HashMap::new();
+    for e in &program.enums {
+        let before = diagnostics_len(&diagnostics);
+        let mut seen = std::collections::HashSet::new();
+        for v in &e.variants {
+            if !seen.insert(v.name.clone()) {
+                diagnostics.push(Diagnostic::error(
+                    "E0073",
+                    format!("enum `{}` has a duplicate variant `{}`", e.name, v.name),
+                    v.span,
+                ));
+            }
+        }
+        if enum_variants
+            .insert(
+                e.name.clone(),
+                e.variants
+                    .iter()
+                    .map(|v| v.name.clone())
+                    .collect::<Vec<_>>(),
+            )
+            .is_some()
+        {
+            diagnostics.push(Diagnostic::error(
+                "E0069",
+                format!("enum `{}` is defined multiple times", e.name),
+                e.span,
+            ));
+        }
+        tag_new_diagnostics(&mut diagnostics, before, &origin_of, &e.name);
+    }
+    let struct_names: std::collections::HashSet<&str> =
+        program.structs.iter().map(|s| s.name.as_str()).collect();
+    for e in &program.enums {
+        if struct_names.contains(e.name.as_str()) {
+            diagnostics.push(Diagnostic::error(
+                "E0074",
+                format!("`{}` is defined as both a struct and an enum", e.name),
+                e.span,
+            ));
+        }
+    }
+    let program = resolve_named_types(program, &enum_variants);
+    let program = &program;
 
     // Pass 1: struct field tables (field types are restricted to scalars
     // and other struct names by the parser, so no forward-reference
@@ -962,6 +1078,7 @@ pub fn analyze(program: &Program) -> (Option<TypedProgram>, DiagnosticBag) {
     // first field access).
     let mut structs = HashMap::new();
     for s in &program.structs {
+        let before = diagnostics_len(&diagnostics);
         for field in &s.fields {
             if !is_scalar(&field.ty) {
                 diagnostics.push(Diagnostic::error(
@@ -987,6 +1104,7 @@ pub fn analyze(program: &Program) -> (Option<TypedProgram>, DiagnosticBag) {
                 s.span,
             ));
         }
+        tag_new_diagnostics(&mut diagnostics, before, &origin_of, &s.name);
     }
 
     // Pass 2: function signatures. Declared return types are registered
@@ -995,6 +1113,7 @@ pub fn analyze(program: &Program) -> (Option<TypedProgram>, DiagnosticBag) {
     // declaration order.
     let mut functions = HashMap::new();
     for func in &program.functions {
+        let before = diagnostics_len(&diagnostics);
         for param in &func.params {
             if !is_scalar(&param.ty) {
                 diagnostics.push(Diagnostic::error(
@@ -1013,12 +1132,17 @@ pub fn analyze(program: &Program) -> (Option<TypedProgram>, DiagnosticBag) {
                 ).with_help("lists, tuples, dicts, and structs are local-only in v0.1 (planned for v0.2)"));
             }
         }
+        let return_type = if func.is_extern {
+            Some(func.declared_return_type.clone().unwrap_or(TypeName::Void))
+        } else {
+            func.declared_return_type.clone()
+        };
         if functions
             .insert(
                 func.name.clone(),
                 FnSig {
                     params: func.params.iter().map(|p| p.ty.clone()).collect(),
-                    return_type: func.declared_return_type.clone(),
+                    return_type,
                 },
             )
             .is_some()
@@ -1029,9 +1153,10 @@ pub fn analyze(program: &Program) -> (Option<TypedProgram>, DiagnosticBag) {
                 func.span,
             ));
         }
+        tag_new_diagnostics(&mut diagnostics, before, &origin_of, &func.name);
     }
 
-    if !functions.contains_key("main") {
+    if require_main && !functions.contains_key("main") {
         diagnostics.push(
             Diagnostic::error("E0037", "no `main` function found", Span::dummy())
                 .with_help("every Kite program needs a `make main():` entry point"),
@@ -1041,10 +1166,13 @@ pub fn analyze(program: &Program) -> (Option<TypedProgram>, DiagnosticBag) {
     let tables = Tables {
         functions: RefCell::new(functions),
         structs,
+        enums: enum_variants,
     };
     let mut analyzer = Analyzer::new(&tables);
     for func in &program.functions {
+        let before = analyzer.diagnostics.iter().count();
         analyzer.check_function(func);
+        tag_new_diagnostics(&mut analyzer.diagnostics, before, &origin_of, &func.name);
     }
     for d in diagnostics.into_vec() {
         analyzer.diagnostics.push(d);
@@ -1056,8 +1184,137 @@ pub fn analyze(program: &Program) -> (Option<TypedProgram>, DiagnosticBag) {
     } else {
         Some(TypedProgram {
             structs: program.structs.clone(),
+            enums: program.enums.clone(),
             functions: program.functions.clone(),
         })
     };
     (typed, analyzer.diagnostics)
+}
+
+fn diagnostics_len(bag: &DiagnosticBag) -> usize {
+    bag.iter().count()
+}
+
+/// Retroactively attributes every diagnostic added to `bag` since index
+/// `before` to the file `name` (a function or struct name) originated
+/// from, if `origin_of` knows one -- used so multi-file compilation
+/// reports each error against the actual file it came from rather than
+/// whichever file the driver treats as "primary".
+fn tag_new_diagnostics(
+    bag: &mut DiagnosticBag,
+    before: usize,
+    origin_of: &impl Fn(&str) -> Option<(String, String)>,
+    name: &str,
+) {
+    let Some((file, src)) = origin_of(name) else {
+        return;
+    };
+    let mut all: Vec<Diagnostic> = std::mem::take(bag).into_vec();
+    for d in all.iter_mut().skip(before) {
+        if d.file_override.is_none() {
+            d.file_override = Some((file.clone(), src.clone()));
+        }
+    }
+    for d in all {
+        bag.push(d);
+    }
+}
+
+/// Rewrites every `TypeName::Struct(name)` type annotation in `program`
+/// into `TypeName::Enum(name)` wherever `name` is actually an enum (the
+/// parser can't distinguish the two at parse time -- both a struct name
+/// and an enum name are just a bare identifier in type position -- so
+/// this is where that ambiguity gets resolved, once, before any other
+/// pass or IR lowering sees the AST). Returns an owned, rewritten copy;
+/// `program` itself is never mutated.
+fn resolve_named_types(program: &Program, enums: &HashMap<String, Vec<String>>) -> Program {
+    if enums.is_empty() {
+        return program.clone();
+    }
+
+    let fix_ty = |ty: &TypeName| -> TypeName {
+        if let TypeName::Struct(name) = ty {
+            if enums.contains_key(name) {
+                return TypeName::Enum(name.clone());
+            }
+        }
+        ty.clone()
+    };
+
+    let mut structs = program.structs.clone();
+    for s in &mut structs {
+        for field in &mut s.fields {
+            field.ty = fix_ty(&field.ty);
+        }
+    }
+
+    let mut functions = program.functions.clone();
+    for f in &mut functions {
+        for param in &mut f.params {
+            param.ty = fix_ty(&param.ty);
+        }
+        if let Some(rt) = &f.declared_return_type {
+            f.declared_return_type = Some(fix_ty(rt));
+        }
+        if let Some(body) = &mut f.body {
+            fix_block(body, &fix_ty);
+        }
+    }
+
+    Program {
+        imports: program.imports.clone(),
+        structs,
+        enums: program.enums.clone(),
+        functions,
+    }
+}
+
+fn fix_block(block: &mut Block, fix_ty: &impl Fn(&TypeName) -> TypeName) {
+    for stmt in &mut block.statements {
+        fix_stmt(stmt, fix_ty);
+    }
+}
+
+fn fix_stmt(stmt: &mut Stmt, fix_ty: &impl Fn(&TypeName) -> TypeName) {
+    match stmt {
+        Stmt::Assign { annotated_type, .. } => {
+            if let Some(ty) = annotated_type {
+                *annotated_type = Some(fix_ty(ty));
+            }
+        }
+        Stmt::If {
+            then_branch,
+            orif_branches,
+            else_branch,
+            ..
+        } => {
+            fix_block(then_branch, fix_ty);
+            for clause in orif_branches {
+                fix_block(&mut clause.body, fix_ty);
+            }
+            if let Some(block) = else_branch {
+                fix_block(block, fix_ty);
+            }
+        }
+        Stmt::Until { body, .. }
+        | Stmt::Infinit { body, .. }
+        | Stmt::ForRange { body, .. }
+        | Stmt::ForEach { body, .. }
+        | Stmt::Thread { body, .. } => fix_block(body, fix_ty),
+        Stmt::Try {
+            try_block,
+            failed_block,
+            finally_block,
+            ..
+        } => {
+            fix_block(try_block, fix_ty);
+            if let Some(block) = failed_block {
+                fix_block(block, fix_ty);
+            }
+            if let Some(block) = finally_block {
+                fix_block(block, fix_ty);
+            }
+        }
+        Stmt::Expr(_) | Stmt::Return { .. } | Stmt::Break(_) | Stmt::Continue(_) => {}
+    }
 }

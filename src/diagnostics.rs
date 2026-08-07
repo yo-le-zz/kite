@@ -88,6 +88,12 @@ pub struct Diagnostic {
     pub label: Option<String>,
     /// A longer, optional suggestion printed below the snippet.
     pub help: Option<String>,
+    /// For multi-file compilation: overrides which (filename, source
+    /// text) pair this diagnostic renders against, since a single-file
+    /// `filename`/`source` passed to `DiagnosticBag::emit` isn't always
+    /// the file this diagnostic actually came from (see `driver.rs`'s
+    /// multi-file loader and `sema::analyze_multi_file`).
+    pub file_override: Option<(String, String)>,
 }
 
 impl Diagnostic {
@@ -99,6 +105,7 @@ impl Diagnostic {
             span,
             label: None,
             help: None,
+            file_override: None,
         }
     }
 
@@ -110,6 +117,7 @@ impl Diagnostic {
             span,
             label: None,
             help: None,
+            file_override: None,
         }
     }
 
@@ -120,6 +128,13 @@ impl Diagnostic {
 
     pub fn with_help(mut self, help: impl Into<String>) -> Self {
         self.help = Some(help.into());
+        self
+    }
+
+    /// Attributes this diagnostic to a specific file, overriding whatever
+    /// `filename`/`source` is later passed to `render`/`emit`.
+    pub fn with_file(mut self, filename: impl Into<String>, source: impl Into<String>) -> Self {
+        self.file_override = Some((filename.into(), source.into()));
         self
     }
 
@@ -135,7 +150,11 @@ impl Diagnostic {
     ///    |
     ///    = help: provide a value, e.g. `let x = 0;`
     /// ```
-    pub fn render(&self, filename: &str, source: &str) -> String {
+    pub fn render(&self, default_filename: &str, default_source: &str) -> String {
+        let (filename, source) = match &self.file_override {
+            Some((f, s)) => (f.as_str(), s.as_str()),
+            None => (default_filename, default_source),
+        };
         let mut out = String::new();
 
         let code_part = match self.code {
@@ -244,6 +263,26 @@ impl DiagnosticBag {
 
     pub fn into_vec(self) -> Vec<Diagnostic> {
         self.diagnostics
+    }
+
+    /// Tags every diagnostic currently in this bag (that doesn't already
+    /// have an explicit file) with `filename`/`source`. Used when
+    /// compiling multiple files: a secondary file's own lex/parse
+    /// diagnostics are collected into their own bag first, then retagged
+    /// with that file's identity before being merged into the overall
+    /// bag, so they still render against the right source text even
+    /// though the top-level driver only has one "current" filename.
+    pub fn retag_file(&mut self, filename: &str, source: &str) {
+        for diag in &mut self.diagnostics {
+            if diag.file_override.is_none() {
+                diag.file_override = Some((filename.to_string(), source.to_string()));
+            }
+        }
+    }
+
+    /// Appends every diagnostic from `other` into this bag.
+    pub fn extend(&mut self, other: DiagnosticBag) {
+        self.diagnostics.extend(other.diagnostics);
     }
 
     /// Print every diagnostic to stderr.

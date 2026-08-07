@@ -51,7 +51,7 @@ fn parses_function_with_params_and_return_type() {
 #[test]
 fn parses_inferred_and_annotated_assignment() {
     let program = parse_ok("make main():\n    age = 20\n    name: string = \"Kite\"\n");
-    let stmts = &program.functions[0].body.statements;
+    let stmts = &program.functions[0].body.as_ref().unwrap().statements;
     assert_eq!(stmts.len(), 2);
     match &stmts[1] {
         Stmt::Assign {
@@ -67,7 +67,7 @@ fn parses_if_orif_else_chain() {
     let program = parse_ok(
         "make main():\n    if a:\n        x = 1\n    orif b:\n        x = 2\n    else:\n        x = 3\n",
     );
-    match &program.functions[0].body.statements[0] {
+    match &program.functions[0].body.as_ref().unwrap().statements[0] {
         Stmt::If {
             orif_branches,
             else_branch,
@@ -86,11 +86,11 @@ fn parses_until_and_infinit_loops() {
         "make main():\n    until x >= 3:\n        x = x + 1\n    infinit:\n        break\n",
     );
     assert!(matches!(
-        program.functions[0].body.statements[0],
+        program.functions[0].body.as_ref().unwrap().statements[0],
         Stmt::Until { .. }
     ));
     assert!(matches!(
-        program.functions[0].body.statements[1],
+        program.functions[0].body.as_ref().unwrap().statements[1],
         Stmt::Infinit { .. }
     ));
 }
@@ -99,11 +99,11 @@ fn parses_until_and_infinit_loops() {
 fn parses_for_range_and_for_each() {
     let program = parse_ok("make main():\n    for i = 1 to 10:\n        print(i)\n    for item in numbers:\n        print(item)\n");
     assert!(matches!(
-        program.functions[0].body.statements[0],
+        program.functions[0].body.as_ref().unwrap().statements[0],
         Stmt::ForRange { .. }
     ));
     assert!(matches!(
-        program.functions[0].body.statements[1],
+        program.functions[0].body.as_ref().unwrap().statements[1],
         Stmt::ForEach { .. }
     ));
 }
@@ -113,7 +113,7 @@ fn parses_list_tuple_dict_literals() {
     let program = parse_ok(
         "make main():\n    a = [1, 2, 3]\n    b = (1, 2)\n    c = {\n        \"x\": 1,\n    }\n",
     );
-    let stmts = &program.functions[0].body.statements;
+    let stmts = &program.functions[0].body.as_ref().unwrap().statements;
     match &stmts[0] {
         Stmt::Assign {
             value: Expr::ListLiteral(items, _),
@@ -141,14 +141,14 @@ fn parses_list_tuple_dict_literals() {
 fn parses_indexing_and_field_access() {
     let program = parse_ok("make main():\n    x = numbers[1]\n    y = user.name\n");
     assert!(matches!(
-        &program.functions[0].body.statements[0],
+        &program.functions[0].body.as_ref().unwrap().statements[0],
         Stmt::Assign {
             value: Expr::Index { .. },
             ..
         }
     ));
     assert!(matches!(
-        &program.functions[0].body.statements[1],
+        &program.functions[0].body.as_ref().unwrap().statements[1],
         Stmt::Assign {
             value: Expr::Field { .. },
             ..
@@ -167,7 +167,7 @@ fn parses_struct_def() {
 #[test]
 fn parses_try_failed_finally() {
     let program = parse_ok("make main():\n    try:\n        x = 1\n    failed err:\n        print(err)\n    finally:\n        print(\"done\")\n");
-    match &program.functions[0].body.statements[0] {
+    match &program.functions[0].body.as_ref().unwrap().statements[0] {
         Stmt::Try {
             failed_var,
             failed_block,
@@ -193,7 +193,7 @@ fn parses_imports() {
 fn parses_and_or_not_precedence() {
     // `not` binds tighter than `and`, which binds tighter than `or`.
     let program = parse_ok("make main():\n    x = a or b and not c\n");
-    match &program.functions[0].body.statements[0] {
+    match &program.functions[0].body.as_ref().unwrap().statements[0] {
         Stmt::Assign {
             value: Expr::Binary { op: BinOp::Or, .. },
             ..
@@ -207,9 +207,20 @@ fn parses_thread_and_async_await() {
     let program = parse_ok("async make download() -> int:\n    return 1\n\nmake main():\n    thread:\n        print(\"hi\")\n    x = await download()\n");
     assert!(program.functions[0].is_async);
     assert!(matches!(
-        program.functions[1].body.statements[0],
+        program.functions[1].body.as_ref().unwrap().statements[0],
         Stmt::Thread { .. }
     ));
+}
+
+#[test]
+fn parses_extern_function_declaration() {
+    let program = parse_ok(
+        "extern make c_add(a: int, b: int) -> int\n\nmake main():\n    print(c_add(1, 2))\n",
+    );
+    assert!(program.functions[0].is_extern);
+    assert!(program.functions[0].body.is_none());
+    assert_eq!(program.functions[0].params.len(), 2);
+    assert!(!program.functions[1].is_extern);
 }
 
 #[test]

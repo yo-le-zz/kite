@@ -142,3 +142,131 @@ fn for_range_and_for_each() {
     };
     assert_eq!(stdout, "1\n2\n3\n7\n8\n9\n");
 }
+
+#[test]
+fn enums_compare_and_dispatch() {
+    let source = "enum Color:\n    Red\n    Green\n    Blue\n\nmake name(c: Color) -> string:\n    if c == Color.Red:\n        return \"red\"\n    orif c == Color.Green:\n        return \"green\"\n    else:\n        return \"blue\"\n\nmake main():\n    print(name(Color.Green))\n    print(Color.Red == Color.Red)\n    print(Color.Red == Color.Blue)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "green\ntrue\nfalse\n");
+}
+
+#[test]
+fn freestanding_build_produces_object_file_without_main() {
+    if !clang_available() {
+        eprintln!("skipping: clang not found on PATH");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let output_path = dir.path().join("lib.o");
+    let src = dir.path().join("main.ki");
+    std::fs::write(
+        &src,
+        "make add(a: int, b: int) -> int:\n    return a + b\n\nmake kernel_entry() -> int:\n    return add(2, 3)\n",
+    )
+    .unwrap();
+
+    kite::driver::build_project_freestanding(&src, dir.path(), &output_path, 0, None)
+        .expect("freestanding build failed");
+
+    assert!(output_path.is_file());
+    let bytes = std::fs::read(&output_path).expect("read object file");
+    assert!(!bytes.is_empty());
+}
+
+#[test]
+fn computed_non_int_return_values_keep_their_type() {
+    // Regression test: a function returning a *computed* (non-literal)
+    // bool/float value used to be miscompiled -- codegen guessed the
+    // return type of a temporary register as always `i64`, corrupting
+    // anything that wasn't secretly int-shaped.
+    let source = "make is_even(n: int) -> bool:\n    return n % 2 == 0\n\nmake half(x: float) -> float:\n    return x / 2.0\n\nmake main():\n    print(is_even(10))\n    print(is_even(7))\n    print(half(9.0))\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "true\nfalse\n4.500000\n");
+}
+
+#[test]
+fn call_argument_that_is_a_computed_bool_or_float_keeps_its_type() {
+    // Same bug class, but for call *arguments* built from an expression
+    // rather than a bare literal/variable.
+    let source = "make describe(flag: bool) -> string:\n    if flag:\n        return \"yes\"\n    return \"no\"\n\nmake main():\n    print(describe(3 > 1))\n    print(describe(1 > 3))\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "yes\nno\n");
+}
+
+#[test]
+fn kite_can_call_c_via_extern_and_link() {
+    if !clang_available() {
+        eprintln!("skipping: clang not found on PATH");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+
+    let c_path = dir.path().join("helper.c");
+    std::fs::write(&c_path, "long c_double(long x) { return x * 2; }\n").unwrap();
+
+    let src = dir.path().join("main.ki");
+    std::fs::write(
+        &src,
+        "extern make c_double(x: int) -> int\n\nmake main():\n    print(c_double(21))\n",
+    )
+    .unwrap();
+
+    let output_path = dir.path().join("prog");
+    kite::driver::build_project(&src, dir.path(), &output_path, 0, None, false, &[c_path])
+        .expect("build with --link should succeed");
+
+    let output = Command::new(&output_path)
+        .output()
+        .expect("run compiled program");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "42\n");
+}
+
+#[test]
+fn kite_lib_produces_object_and_header_callable_from_c() {
+    if !clang_available() {
+        eprintln!("skipping: clang not found on PATH");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("main.ki");
+    std::fs::write(&src, "make kite_square(x: int) -> int:\n    return x * x\n").unwrap();
+
+    let output_path = dir.path().join("lib.o");
+    let header_path = kite::driver::build_project_lib(&src, dir.path(), &output_path, 0, None)
+        .expect("lib build should succeed");
+    assert!(output_path.is_file());
+    assert!(header_path.is_file());
+
+    let c_main = dir.path().join("main.c");
+    std::fs::write(
+        &c_main,
+        format!(
+            "#include <stdio.h>\n#include \"{}\"\nint main(void) {{ printf(\"%lld\\n\", (long long)kite_square(6)); return 0; }}\n",
+            header_path.display()
+        ),
+    )
+    .unwrap();
+
+    let exe_path = dir.path().join("c_prog");
+    let status = Command::new("clang")
+        .args([
+            c_main.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            "-o",
+            exe_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("clang link should run");
+    assert!(status.success());
+
+    let output = Command::new(&exe_path).output().expect("run c program");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "36\n");
+}

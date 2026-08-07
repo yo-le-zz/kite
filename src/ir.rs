@@ -28,7 +28,7 @@
 //! There is no runtime error/exception type yet (`failed` is
 //! type-checked by sema but never reachable -- see `docs/roadmap.md`), so
 //! the only way to leave a `try` block early is `return`, `break`, or
-//! `continue`. [`FunctionLowerer::finally_stack`] tracks every
+//! `continue`. `FunctionLowerer::finally_stack` tracks every
 //! `finally` block whose `try` is currently "in scope"; lowering any of
 //! those three statements first replays (inlines) the relevant pending
 //! `finally` blocks before emitting the actual jump/return, exactly
@@ -71,6 +71,7 @@ impl From<&TypeName> for IrType {
                 IrType::Tuple(fields.iter().map(|(_, t)| IrType::from(t)).collect())
             }
             TypeName::Struct(name) => IrType::StructRef(name.clone()),
+            TypeName::Enum(_) => IrType::I64,
         }
     }
 }
@@ -110,7 +111,7 @@ pub enum IrValue {
     /// backed by a stack slot -- reading a *scalar* local requires a
     /// `load` (emitted lazily at the point of use by codegen, or eagerly
     /// via [`IrInstr::Load`] where lowering needs the value pinned before
-    /// further code runs -- see [`FunctionLowerer::materialize`]).
+    /// further code runs -- see `FunctionLowerer::materialize`).
     Local(String),
     /// The raw SSA register holding an incoming function parameter, before
     /// it has been spilled into its `alloca`'d slot.
@@ -181,7 +182,7 @@ pub enum IrInstr {
     /// Eagerly loads a scalar local into a fresh temp *right now* (as
     /// opposed to `IrValue::Local`, which codegen loads lazily at the
     /// point of use). Used to snapshot a value before code that might
-    /// mutate the same local runs -- see [`FunctionLowerer::materialize`].
+    /// mutate the same local runs -- see `FunctionLowerer::materialize`.
     Load {
         dest: Temp,
         name: String,
@@ -237,7 +238,7 @@ pub enum IrInstr {
     Call {
         dest: Option<Temp>,
         name: String,
-        args: Vec<IrValue>,
+        args: Vec<(IrValue, IrType)>,
         ret_ty: IrType,
     },
     Print {
@@ -281,7 +282,11 @@ pub enum IrInstr {
         then_label: String,
         else_label: String,
     },
-    Return(Option<IrValue>),
+    /// Carries the value's actual computed type explicitly (rather than
+    /// letting codegen re-derive/guess it from the bare `IrValue`, which
+    /// is unreliable for a `Temp` -- a numbered SSA register has no
+    /// intrinsic type of its own in this representation).
+    Return(Option<(IrValue, IrType)>),
     Unreachable,
     /// A codegen no-op: records that `name` now has aggregate `layout`,
     /// without performing any initialization itself (used when a plain
@@ -322,10 +327,21 @@ pub struct IrStruct {
     pub fields: Vec<(String, IrType)>,
 }
 
+/// A `declare`-only entry for `extern make name(...)` -- see the module
+/// docs on C interop. No `IrFunction` (and hence no `define`/body) is
+/// ever produced for these; codegen just emits an LLVM `declare`.
+#[derive(Debug, Clone)]
+pub struct IrExternFn {
+    pub name: String,
+    pub params: Vec<IrType>,
+    pub return_type: IrType,
+}
+
 #[derive(Debug, Clone)]
 pub struct IrProgram {
     pub structs: Vec<IrStruct>,
     pub functions: Vec<IrFunction>,
+    pub externs: Vec<IrExternFn>,
 }
 
 /// Lowers a whole typed program into IR.
@@ -359,6 +375,17 @@ pub fn lower_program(program: &ast::Program) -> IrProgram {
         .collect();
     let sigs = resolve_return_types(program, sigs);
 
+    let enum_table: HashMap<String, Vec<String>> = program
+        .enums
+        .iter()
+        .map(|e| {
+            (
+                e.name.clone(),
+                e.variants.iter().map(|v| v.name.clone()).collect(),
+            )
+        })
+        .collect();
+
     let structs = program
         .structs
         .iter()
@@ -371,10 +398,30 @@ pub fn lower_program(program: &ast::Program) -> IrProgram {
     let functions = program
         .functions
         .iter()
-        .map(|f| lower_function(f, &sigs, &struct_table))
+        .filter(|f| !f.is_extern)
+        .map(|f| lower_function(f, &sigs, &struct_table, &enum_table))
         .collect();
 
-    IrProgram { structs, functions }
+    let externs = program
+        .functions
+        .iter()
+        .filter(|f| f.is_extern)
+        .map(|f| IrExternFn {
+            name: f.name.clone(),
+            params: f.params.iter().map(|p| IrType::from(&p.ty)).collect(),
+            return_type: f
+                .declared_return_type
+                .as_ref()
+                .map(IrType::from)
+                .unwrap_or(IrType::Void),
+        })
+        .collect();
+
+    IrProgram {
+        structs,
+        functions,
+        externs,
+    }
 }
 
 /// Fills in `Void` placeholders for functions whose return type was
@@ -386,10 +433,11 @@ fn resolve_return_types(
     mut sigs: HashMap<String, IrType>,
 ) -> HashMap<String, IrType> {
     for func in &program.functions {
-        if func.declared_return_type.is_some() {
+        if func.declared_return_type.is_some() || func.is_extern {
             continue;
         }
-        if let Some(ty) = find_first_return_type(&func.body, &sigs) {
+        let Some(body) = &func.body else { continue };
+        if let Some(ty) = find_first_return_type(body, &sigs) {
             sigs.insert(func.name.clone(), ty);
         }
     }
@@ -481,8 +529,9 @@ fn lower_function(
     func: &ast::Function,
     sigs: &HashMap<String, IrType>,
     structs: &HashMap<String, Vec<(String, IrType)>>,
+    enums: &HashMap<String, Vec<String>>,
 ) -> IrFunction {
-    let mut lowerer = FunctionLowerer::new(sigs.clone(), structs.clone());
+    let mut lowerer = FunctionLowerer::new(sigs.clone(), structs.clone(), enums.clone());
     for param in &func.params {
         let ty = IrType::from(&param.ty);
         lowerer.body.push(IrInstr::Alloca {
@@ -494,7 +543,11 @@ fn lower_function(
             value: IrValue::Param(format!("{}.arg", param.name)),
         });
     }
-    lowerer.lower_block(&func.body);
+    lowerer.lower_block(
+        func.body
+            .as_ref()
+            .expect("non-extern function always has a body"),
+    );
 
     let return_type = sigs.get(&func.name).cloned().unwrap_or(IrType::Void);
     if !matches!(
@@ -536,6 +589,9 @@ struct LoopLabels {
 struct FunctionLowerer {
     sigs: HashMap<String, IrType>,
     structs: HashMap<String, Vec<(String, IrType)>>,
+    /// enum name -> variant names in declaration order (their index is
+    /// the runtime `int` tag).
+    enums: HashMap<String, Vec<String>>,
     body: Vec<IrInstr>,
     next_temp: Temp,
     next_label: u32,
@@ -546,10 +602,15 @@ struct FunctionLowerer {
 }
 
 impl FunctionLowerer {
-    fn new(sigs: HashMap<String, IrType>, structs: HashMap<String, Vec<(String, IrType)>>) -> Self {
+    fn new(
+        sigs: HashMap<String, IrType>,
+        structs: HashMap<String, Vec<(String, IrType)>>,
+        enums: HashMap<String, Vec<String>>,
+    ) -> Self {
         Self {
             sigs,
             structs,
+            enums,
             body: Vec::new(),
             next_temp: 0,
             next_label: 0,
@@ -630,7 +691,7 @@ impl FunctionLowerer {
             ast::Stmt::Return { value, .. } => {
                 let val = value.as_ref().map(|e| {
                     let (v, ty) = self.lower_expr(e);
-                    self.materialize(v, &ty)
+                    (self.materialize(v, &ty), ty)
                 });
                 self.replay_finally_from(0);
                 self.body.push(IrInstr::Return(val));
@@ -1290,7 +1351,18 @@ impl FunctionLowerer {
             ast::Expr::Binary { op, lhs, rhs, .. } => self.lower_binary(*op, lhs, rhs),
             ast::Expr::Call { name, args, .. } => self.lower_call(name, args),
             ast::Expr::Await { expr, .. } => self.lower_expr(expr),
-            ast::Expr::Field { base, field, .. } => self.lower_field_get(base, field),
+            ast::Expr::Field { base, field, .. } => {
+                // `EnumName.Variant` -- resolved to its integer tag here
+                // rather than going through the aggregate field-access
+                // path, since `EnumName` is a type name, not a variable.
+                if let ast::Expr::Identifier(name, _) = base.as_ref() {
+                    if let Some(variants) = self.enums.get(name) {
+                        let index = variants.iter().position(|v| v == field).unwrap_or(0);
+                        return (IrValue::ConstInt(index as i64), IrType::I64);
+                    }
+                }
+                self.lower_field_get(base, field)
+            }
             ast::Expr::Index { base, index, .. } => self.lower_index_get(base, index),
             ast::Expr::ListLiteral(..)
             | ast::Expr::TupleLiteral(..)
@@ -1562,7 +1634,7 @@ impl FunctionLowerer {
 
         let mut arg_vals = Vec::new();
         for arg in args {
-            arg_vals.push(self.lower_expr(arg).0);
+            arg_vals.push(self.lower_expr(arg));
         }
         let ret_ty = self.sigs.get(name).cloned().unwrap_or(IrType::Void);
         if ret_ty == IrType::Void {

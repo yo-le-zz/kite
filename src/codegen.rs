@@ -10,7 +10,7 @@
 //! Kite v0.1 has no bespoke runtime library -- it leans on a handful of
 //! libc functions declared at the top of every module: `printf` (for
 //! `print`), `malloc`/`realloc`/`free`/`memcpy` (for growable lists --
-//! see [`emit_list_append`]), `strlen` (for `len` on strings), and `exit`
+//! see `emit_list_append`), `strlen` (for `len` on strings), and `exit`
 //! (for the safety abort a failed runtime bounds check triggers).
 
 use crate::ir::*;
@@ -19,6 +19,12 @@ use std::fmt::Write as _;
 
 pub struct CodegenOptions {
     pub target_triple: Option<String>,
+    /// When true, `main` is emitted as an ordinary function using its own
+    /// declared/inferred return type instead of being special-cased into
+    /// a hosted-C-runtime `i32 @main()` entry point (see `kite build
+    /// --freestanding`). Used for code meant to be linked into another
+    /// C/kernel/OS build rather than run standalone.
+    pub freestanding: bool,
 }
 
 /// Emits a complete LLVM IR module (as text) for a Kite program.
@@ -51,6 +57,16 @@ pub fn emit_module(program: &IrProgram, options: &CodegenOptions) -> String {
     out.push_str("declare i32 @strcmp(i8*, i8*)\n");
     out.push_str("declare void @exit(i32)\n\n");
 
+    if !program.externs.is_empty() {
+        out.push_str("; extern declarations (implemented outside Kite, e.g. in C)\n");
+        for e in &program.externs {
+            let ret = llvm_type(&e.return_type);
+            let params: Vec<String> = e.params.iter().map(llvm_type).collect();
+            let _ = writeln!(out, "declare {ret} @{}({})", e.name, params.join(", "));
+        }
+        out.push('\n');
+    }
+
     out.push_str(&global_string("@.fmt.int", "%lld\\0A\\00"));
     out.push_str(&global_string("@.fmt.float", "%f\\0A\\00"));
     out.push_str(&global_string("@.fmt.str", "%s\\0A\\00"));
@@ -73,7 +89,7 @@ pub fn emit_module(program: &IrProgram, options: &CodegenOptions) -> String {
     }
 
     for func in &program.functions {
-        emit_function(func, &mut ctx, &mut out);
+        emit_function(func, &mut ctx, options.freestanding, &mut out);
         out.push('\n');
     }
 
@@ -121,7 +137,7 @@ fn collect_string_constants(func: &IrFunction, ctx: &mut ModuleCtx) {
             }
             IrInstr::Neg { value, .. } | IrInstr::Not { value, .. } => visit(value, ctx),
             IrInstr::Call { args, .. } => {
-                for a in args {
+                for (a, _) in args {
                     visit(a, ctx);
                 }
             }
@@ -133,7 +149,7 @@ fn collect_string_constants(func: &IrFunction, ctx: &mut ModuleCtx) {
             }
             IrInstr::FieldSet { value, .. } => visit(value, ctx),
             IrInstr::Branch { cond, .. } => visit(cond, ctx),
-            IrInstr::Return(Some(v)) => visit(v, ctx),
+            IrInstr::Return(Some((v, _))) => visit(v, ctx),
             _ => {}
         }
     }
@@ -176,7 +192,7 @@ fn escape_llvm_string(s: &str) -> String {
 }
 
 fn string_byte_len_with_nul(s: &str) -> usize {
-    s.as_bytes().len() + 1
+    s.len() + 1
 }
 
 struct FnCtx<'a> {
@@ -184,8 +200,14 @@ struct FnCtx<'a> {
     locals: HashMap<String, IrType>,
 }
 
-fn emit_function(func: &IrFunction, ctx: &mut ModuleCtx, out: &mut String) {
-    let is_main = func.name == "main";
+fn emit_function(func: &IrFunction, ctx: &mut ModuleCtx, freestanding: bool, out: &mut String) {
+    // In hosted mode, `main` is wrapped to the C runtime's expected
+    // `int main()` ABI (see `emit_instr`'s `Return` handling below). In
+    // `--freestanding` mode there is no C runtime calling it -- the
+    // embedding kernel/OS calls Kite functions directly with whatever
+    // signature they actually declare -- so `main` is just an ordinary
+    // function like any other.
+    let is_main = func.name == "main" && !freestanding;
     let llvm_ret_ty = if is_main {
         "i32".to_string()
     } else {
@@ -323,10 +345,9 @@ fn emit_instr(instr: &IrInstr, fctx: &mut FnCtx, is_main: bool, out: &mut String
             ret_ty,
         } => {
             let mut arg_strs = Vec::new();
-            for a in args {
-                let ty = value_hint_type(a, fctx);
-                let (s, _) = emit_value(a, fctx, &ty, out);
-                arg_strs.push(format!("{} {s}", llvm_type(&ty)));
+            for (a, ty) in args {
+                let (s, _) = emit_value(a, fctx, ty, out);
+                arg_strs.push(format!("{} {s}", llvm_type(ty)));
             }
             let rty = llvm_type(ret_ty);
             match dest {
@@ -409,7 +430,7 @@ fn emit_instr(instr: &IrInstr, fctx: &mut FnCtx, is_main: bool, out: &mut String
         IrInstr::Return(value) => {
             if is_main {
                 match value {
-                    Some(v) => {
+                    Some((v, _)) => {
                         let (val, _) = emit_value(v, fctx, &IrType::I64, out);
                         let _ = writeln!(out, "  ret i32 {val}");
                     }
@@ -419,10 +440,9 @@ fn emit_instr(instr: &IrInstr, fctx: &mut FnCtx, is_main: bool, out: &mut String
                 }
             } else {
                 match value {
-                    Some(v) => {
-                        let ty = value_hint_type(v, fctx);
-                        let (val, _) = emit_value(v, fctx, &ty, out);
-                        let _ = writeln!(out, "  ret {} {val}", llvm_type(&ty));
+                    Some((v, ty)) => {
+                        let (val, _) = emit_value(v, fctx, ty, out);
+                        let _ = writeln!(out, "  ret {} {val}", llvm_type(ty));
                     }
                     None => {
                         let _ = writeln!(out, "  ret void");
@@ -692,18 +712,6 @@ fn emit_value(
     }
 }
 
-fn value_hint_type(value: &IrValue, fctx: &FnCtx) -> IrType {
-    match value {
-        IrValue::ConstInt(_) => IrType::I64,
-        IrValue::ConstFloat(_) => IrType::F64,
-        IrValue::ConstBool(_) => IrType::Bool,
-        IrValue::ConstStr(_) => IrType::Str,
-        IrValue::Param(_) => IrType::I64,
-        IrValue::Local(name) => fctx.locals.get(name).cloned().unwrap_or(IrType::I64),
-        IrValue::Temp(_) => IrType::I64,
-    }
-}
-
 fn emit_print(value: &IrValue, ty: &IrType, fctx: &mut FnCtx, out: &mut String) {
     match ty {
         IrType::I64 => {
@@ -839,7 +847,7 @@ fn sanitize_label(label: &str) -> String {
 
 use std::cell::Cell;
 thread_local! {
-    static REG_COUNTER: Cell<u32> = Cell::new(0);
+    static REG_COUNTER: Cell<u32> = const { Cell::new(0) };
 }
 
 fn fresh_reg_name() -> String {

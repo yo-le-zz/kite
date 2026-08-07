@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" width="64" height="64">
+  <!-- The Kite logo: a simple kite shape with its tail, in the language's
+       accent color. Kept intentionally minimal so it reads clearly at
+       small sizes (editor file icons, README badges, package registries). -->
+  <defs>
+    <linearGradient id="kite-fill" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#6C63FF"/>
+      <stop offset="100%" stop-color="#3B82F6"/>
+    </linearGradient>
+  </defs>
+  <polygon points="32,4 54,26 32,60 10,26" fill="url(#kite-fill)"/>
+  <polygon points="32,4 54,26 32,32" fill="#ffffff" fill-opacity="0.18"/>
+  <line x1="32" y1="4" x2="32" y2="60" stroke="#ffffff" stroke-opacity="0.5" stroke-width="1.5"/>
+  <line x1="10" y1="26" x2="54" y2="26" stroke="#ffffff" stroke-opacity="0.5" stroke-width="1.5"/>
+  <path d="M32 60 C 30.5 61, 33.5 61.5, 32 62.5 C 30.5 63.5, 33.5 64, 32 65"
+        fill="none" stroke="#3B82F6" stroke-width="1.5" stroke-linecap="round"/>
+</svg>

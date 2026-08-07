@@ -233,14 +233,14 @@ impl Lexer {
 
     fn lex_number(&mut self) -> Option<TokenKind> {
         let start = self.pos;
-        while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+        while self.peek().is_some_and(|c| c.is_ascii_digit()) {
             self.advance();
         }
         let mut is_float = false;
-        if self.peek() == Some('.') && self.peek_at(1).map_or(false, |c| c.is_ascii_digit()) {
+        if self.peek() == Some('.') && self.peek_at(1).is_some_and(|c| c.is_ascii_digit()) {
             is_float = true;
             self.advance();
-            while self.peek().map_or(false, |c| c.is_ascii_digit()) {
+            while self.peek().is_some_and(|c| c.is_ascii_digit()) {
                 self.advance();
             }
         }
@@ -304,7 +304,7 @@ impl Lexer {
 
     fn lex_identifier(&mut self) -> Option<TokenKind> {
         let start = self.pos;
-        while self.peek().map_or(false, is_ident_continue) {
+        while self.peek().is_some_and(is_ident_continue) {
             self.advance();
         }
         let text: String = self.chars[start..self.pos].iter().collect();
@@ -397,11 +397,21 @@ impl Lexer {
                 }
             }
             other => {
-                self.diagnostics.push(Diagnostic::error(
+                let mut diag = Diagnostic::error(
                     "E0003",
                     format!("unexpected character `{other}`"),
                     Span::new(self.pos - 1, self.pos, line, col),
-                ));
+                );
+                diag = match other {
+                    '^' | '&' | '|' | '~' => diag.with_help(format!(
+                        "`{other}` is not supported in Kite v0.1\n         supported arithmetic operators: + - * / %\n         supported boolean operators:   and or not\n         supported comparisons:         == != < > <= >="
+                    )),
+                    ';' => diag.with_help(
+                        "Kite doesn't use semicolons -- statements end at the newline",
+                    ),
+                    _ => diag,
+                };
+                self.diagnostics.push(diag);
                 return None;
             }
         };

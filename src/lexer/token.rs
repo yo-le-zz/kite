@@ -16,7 +16,8 @@ pub enum TokenKind {
 
     // Identifiers & keywords
     Identifier(String),
-    Make, // fn declaration
+    Make,   // fn declaration
+    Extern, // extern function declaration (C FFI)
     Return,
     If,
     Orif, // else-if
@@ -35,6 +36,7 @@ pub enum TokenKind {
     From,
     Import,
     Type, // struct declaration
+    Enum, // enum declaration
     Thread,
     Async,
     Await,
@@ -92,6 +94,7 @@ impl fmt::Display for TokenKind {
             StringLiteral(v) => write!(f, "string literal \"{v}\""),
             Identifier(name) => write!(f, "identifier `{name}`"),
             Make => write!(f, "`make`"),
+            Extern => write!(f, "`extern`"),
             Return => write!(f, "`return`"),
             If => write!(f, "`if`"),
             Orif => write!(f, "`orif`"),
@@ -110,6 +113,7 @@ impl fmt::Display for TokenKind {
             From => write!(f, "`from`"),
             Import => write!(f, "`import`"),
             Type => write!(f, "`type`"),
+            Enum => write!(f, "`enum`"),
             Thread => write!(f, "`thread`"),
             Async => write!(f, "`async`"),
             Await => write!(f, "`await`"),
@@ -169,6 +173,7 @@ pub fn lookup_keyword(ident: &str) -> Option<TokenKind> {
     use TokenKind::*;
     Some(match ident {
         "make" => Make,
+        "extern" => Extern,
         "return" => Return,
         "if" => If,
         "orif" => Orif,
@@ -187,6 +192,7 @@ pub fn lookup_keyword(ident: &str) -> Option<TokenKind> {
         "from" => From,
         "import" => Import,
         "type" => Type,
+        "enum" => Enum,
         "thread" => Thread,
         "async" => Async,
         "await" => Await,

@@ -1,0 +1,25 @@
+{
+  "name": "tree-sitter-kite",
+  "version": "0.1.0",
+  "description": "Tree-sitter grammar for the Kite programming language",
+  "main": "bindings/node",
+  "repository": "https://github.com/yo-le-zz/tree-sitter-kite",
+  "license": "MIT",
+  "author": "yo-le-zz",
+  "keywords": ["parser", "lexer", "kite"],
+  "scripts": {
+    "generate": "tree-sitter generate",
+    "test": "tree-sitter test",
+    "build": "tree-sitter build"
+  },
+  "devDependencies": {
+    "tree-sitter-cli": "^0.26.11"
+  },
+  "tree-sitter": [
+    {
+      "scope": "source.kite",
+      "file-types": ["ki"],
+      "highlights": "queries/highlights.scm"
+    }
+  ]
+}

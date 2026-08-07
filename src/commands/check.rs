@@ -1,33 +1,37 @@
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, Result};
 use colored::Colorize;
 
 use kite::driver::{self, CheckOutcome};
-use kite::project::Project;
+use kite::project::{Project, SOURCE_DIR};
 
-pub fn run() -> Result<()> {
+pub fn run(quiet: bool) -> Result<()> {
     let project = Project::discover(&std::env::current_dir()?)?;
 
-    println!(
-        "{:>12} {} v{} ({})",
-        "Checking".green().bold(),
-        project.manifest.package.name,
-        project.manifest.package.version,
-        project.root.display()
-    );
+    if !quiet {
+        println!(
+            "{:>12} {} v{} ({})",
+            "Checking".green().bold(),
+            project.manifest.package.name,
+            project.manifest.package.version,
+            project.root.display()
+        );
+    }
 
-    let source_path = project.main_source_path();
-    let source = std::fs::read_to_string(&source_path).with_context(|| {
-        format!(
-            "failed to read `{}` -- does this project have a `src/main.ki`?",
-            source_path.display()
-        )
-    })?;
+    let entry_path = project.main_source_path();
+    let src_root = project.root.join(SOURCE_DIR);
+    if !entry_path.is_file() {
+        bail!(
+            "`{}` not found -- does this project have a `src/main.ki`?",
+            entry_path.display()
+        );
+    }
 
-    let filename = source_path.to_string_lossy().to_string();
-    let (outcome, _) = driver::check_source(&filename, &source);
+    let (outcome, _) = driver::check_project(&entry_path, &src_root);
     match outcome {
         CheckOutcome::Ok => {
-            println!("{:>12} no errors found", "Checked".green().bold());
+            if !quiet {
+                println!("{:>12} no errors found", "Checked".green().bold());
+            }
             Ok(())
         }
         CheckOutcome::Errors => bail!("aborting due to previous error(s)"),

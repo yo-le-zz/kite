@@ -4,10 +4,22 @@ use std::process::Command;
 
 use crate::commands::build;
 
-pub fn run(target: Option<String>, release: bool) -> Result<()> {
-    let binary = build::run(target, release)?;
+pub fn run(target: Option<String>, release: bool, quiet: bool) -> Result<()> {
+    let binary = build::run(
+        target,
+        release,
+        quiet,
+        build::Mode::Executable {
+            static_link: false,
+            extra_link_inputs: Vec::new(),
+        },
+        None,
+        None,
+    )?;
 
-    println!("{:>12} `{}`", "Running".green().bold(), binary.display());
+    if !quiet {
+        println!("{:>12} `{}`", "Running".green().bold(), binary.display());
+    }
 
     let status = Command::new(&binary)
         .status()

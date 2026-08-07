@@ -15,13 +15,46 @@ fn main() {
 
     let result = match cli.command {
         Command::Init { name } => commands::init::run(name),
-        Command::Build { target, release } => commands::build::run(target, release).map(|_| ()),
-        Command::Run { target, release } => commands::run::run(target, release),
-        Command::Check => commands::check::run(),
+        Command::Build {
+            target,
+            release,
+            quiet,
+            freestanding,
+            lib,
+            r#static,
+            output,
+            out_dir,
+            link,
+        } => {
+            if freestanding && lib {
+                Err(anyhow::anyhow!(
+                    "--freestanding and --lib are mutually exclusive"
+                ))
+            } else {
+                let mode = if freestanding {
+                    commands::build::Mode::Freestanding
+                } else if lib {
+                    commands::build::Mode::Lib
+                } else {
+                    commands::build::Mode::Executable {
+                        static_link: r#static,
+                        extra_link_inputs: link,
+                    }
+                };
+                commands::build::run(target, release, quiet, mode, output, out_dir).map(|_| ())
+            }
+        }
+        Command::Run {
+            target,
+            release,
+            quiet,
+        } => commands::run::run(target, release, quiet),
+        Command::Check { quiet } => commands::check::run(quiet),
         Command::Clean => commands::clean::run(),
         Command::Add { package } => commands::package::add(&package),
         Command::Remove { package } => commands::package::remove(&package),
         Command::Update => commands::package::update(),
+        Command::Bench { runs, target } => commands::bench::run(runs, target),
     };
 
     if let Err(err) = result {

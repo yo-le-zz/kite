@@ -1,0 +1,17 @@
+name = "Kite"
+grammar = "kite"
+path_suffixes = ["ki"]
+line_comments = ["// "]
+autoclose_before = ";:.,=}])"
+
+brackets = [
+  { start = "{", end = "}", close = true, newline = true },
+  { start = "[", end = "]", close = true, newline = true },
+  { start = "(", end = ")", close = true, newline = true },
+  { start = "\"", end = "\"", close = true, newline = false, not_in = ["string"] },
+]
+
+# Kite blocks are delimited by indentation, not braces -- Zed's
+# auto-indent-after-colon behavior (used by Python support too) is what
+# we want here: indent one level after a line ending in `:`.
+increase_indent_pattern = ":\\s*$"
