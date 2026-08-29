@@ -1,0 +1,30 @@
+[package]
+name = "tree-sitter-kite"
+description = "Kite grammar for the tree-sitter parsing library"
+version = "0.1.1"
+authors = ["yo-le-zz"]
+license = "MIT"
+readme = "README.md"
+repository = "https://github.com/yo-le-zz/tree-sitter-kite"
+edition = "2021"
+autoexamples = false
+
+build = "bindings/rust/build.rs"
+include = [
+  "bindings/rust/*",
+  "grammar.js",
+  "queries/*",
+  "src/*",
+]
+
+[lib]
+path = "bindings/rust/lib.rs"
+
+[dependencies]
+tree-sitter-language = "0.1"
+
+[build-dependencies]
+cc = "1.1"
+
+[dev-dependencies]
+tree-sitter = "0.24"

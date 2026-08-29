@@ -1,6 +1,6 @@
 id = "kite"
 name = "Kite"
-version = "0.1.0"
+version = "0.1.1"
 schema_version = 1
 authors = ["yo-le-zz"]
 description = "Syntax highlighting and language configuration for the Kite programming language"

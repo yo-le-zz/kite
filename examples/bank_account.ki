@@ -1,0 +1,26 @@
+// A struct with methods-as-free-functions (Kite has no `impl` blocks
+// yet -- see docs/roadmap.md), demonstrating structs, try/finally, and
+// early-return control flow together.
+type Account:
+    balance: int
+    owner: string
+
+make withdraw(balance: int, amount: int) -> int:
+    try:
+        if amount > balance:
+            print("insufficient funds")
+            return balance
+        return balance - amount
+    finally:
+        print("transaction complete")
+
+make main():
+    acct = Account()
+    acct.owner = "Alex"
+    acct.balance = 100
+
+    acct.balance = withdraw(acct.balance, 30)
+    print(acct.balance)
+
+    acct.balance = withdraw(acct.balance, 1000)
+    print(acct.balance)

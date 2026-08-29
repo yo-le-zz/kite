@@ -1,0 +1,8 @@
+// A multi-file/multi-directory project -- see docs/architecture.md and
+// the "Modules" section of README.md. `use shapes.geometry` resolves to
+// src/shapes/geometry.ki.
+use shapes.geometry
+
+make main():
+    print(circle_area(2.0))
+    print(rectangle_area(3.0, 4.0))

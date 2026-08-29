@@ -1,0 +1,18 @@
+// char_at/substr: inspecting and slicing strings.
+make count_vowels(s: string) -> int:
+    count = 0
+    i = 1
+    n = len(s)
+    until i > n:
+        c = char_at(s, i)
+        if c == 97 or c == 101 or c == 105 or c == 111 or c == 117:
+            count = count + 1
+        i = i + 1
+    return count
+
+make main():
+    s = "hello kite"
+    print(len(s))
+    print(substr(s, 1, 5))
+    print(substr(s, 7, 10))
+    print(count_vowels(s))

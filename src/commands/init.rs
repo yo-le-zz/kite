@@ -8,7 +8,26 @@ const DEFAULT_MAIN: &str = "make main():\n    print(\"Hello, Kite!\")\n";
 
 pub fn run(name: Option<String>) -> Result<()> {
     let (project_dir, package_name, creating_new_dir) = match name {
-        Some(name) => (PathBuf::from(&name), name, true),
+        Some(name) => {
+            let project_dir = PathBuf::from(&name);
+            // The package name is the directory's own name, not
+            // whatever path the user typed to get there -- `kite init
+            // /tmp/foo` and `kite init ../nested/foo` should both name
+            // the package `foo`, exactly like `kite init` with no
+            // argument names it after the current directory below.
+            // Using the raw path string here would be wrong even for a
+            // same-directory relative name like `sub/foo`, and
+            // actively breaks the build for an absolute path: joining
+            // an absolute path onto `target/` (see
+            // `Project::output_binary_path`) replaces the whole thing
+            // instead of appending, so the compiled binary's output
+            // path collides with the project directory itself.
+            let package_name = project_dir
+                .file_name()
+                .map(|n| n.to_string_lossy().to_string())
+                .unwrap_or(name);
+            (project_dir, package_name, true)
+        }
         None => {
             let cwd = std::env::current_dir().context("failed to read current directory")?;
             let name = cwd

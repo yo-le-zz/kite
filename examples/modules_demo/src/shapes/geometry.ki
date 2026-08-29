@@ -1,0 +1,5 @@
+make circle_area(radius: float) -> float:
+    return 3.14159 * radius * radius
+
+make rectangle_area(width: float, height: float) -> float:
+    return width * height

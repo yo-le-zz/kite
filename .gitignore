@@ -6,3 +6,7 @@ tree-sitter-kite/node_modules
 tree-sitter-kite/build
 tree-sitter-kite/*.so
 tree-sitter-kite/*.log
+tree-sitter-kite/target
+tree-sitter-kite/Cargo.lock
+tree-sitter-kite/node_modules
+tree-sitter-kite/build

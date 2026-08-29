@@ -18,7 +18,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu-latest, macos-latest]
+        os: [ubuntu-latest, macos-latest, windows-latest]
 
     steps:
       - name: Check out the repository
@@ -35,14 +35,25 @@ jobs:
       # `kite` shells out to `clang` to turn its generated LLVM IR into a
       # native executable -- this is what the LLVM backend tests and CLI
       # `build`/`run` tests actually exercise, so CI needs it installed
-      # too. Both ubuntu-latest and macos-latest ship a usable `clang`,
-      # but we install/verify explicitly so a missing toolchain fails
-      # loudly instead of silently skipping those tests.
+      # too. ubuntu-latest and macos-latest ship a usable `clang`
+      # already; windows-latest ships LLVM/clang as part of its default
+      # toolset too, but we still verify explicitly below so a missing
+      # toolchain fails loudly instead of silently skipping those tests
+      # on any of the three.
       - name: Install clang (Linux)
         if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y clang
+
+      - name: Install clang (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            choco install llvm -y
+            echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
 
       - name: Verify clang is available
         run: clang --version
@@ -121,3 +132,67 @@ jobs:
             (cd /tmp/example_project && "$KITE" check)
             rm -rf /tmp/example_project
           done
+
+  # Same smoke test as above, but on Windows -- specifically to catch
+  # anything the Linux/macOS jobs can't: the produced binary must be
+  # named `kite.exe` (not extensionless `kite`), `kite run` must be able
+  # to spawn it, and the freestanding/`--lib` object-file builds must
+  # link with the platform's native `clang` target instead of a Unix
+  # one.
+  smoke-test-windows:
+    name: kite init / build / run smoke test (Windows)
+    runs-on: windows-latest
+    needs: test
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust (pinned)
+        uses: dtolnay/rust-toolchain@1.85.0
+
+      - name: Cache cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install clang
+        shell: pwsh
+        run: |
+          if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+            choco install llvm -y
+            echo "C:\Program Files\LLVM\bin" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+          }
+
+      - name: Build the kite binary
+        run: cargo build --release
+
+      - name: kite init
+        run: .\target\release\kite.exe init smoke_test_project
+
+      - name: kite run
+        working-directory: smoke_test_project
+        shell: pwsh
+        run: |
+          $env:GITHUB_WORKSPACE\target\release\kite.exe run | Tee-Object -FilePath output.txt
+
+      - name: Verify hello-world output
+        working-directory: smoke_test_project
+        shell: pwsh
+        run: |
+          if (-not (Select-String -Path output.txt -Pattern "Hello, Kite!" -Quiet)) {
+            throw "expected output.txt to contain 'Hello, Kite!'"
+          }
+
+      - name: Verify the produced binary has a .exe extension
+        working-directory: smoke_test_project
+        shell: pwsh
+        run: |
+          if (-not (Test-Path "target\smoke_test_project.exe")) {
+            throw "expected target\smoke_test_project.exe to exist"
+          }
+
+      - name: kite build --freestanding produces an object file
+        working-directory: smoke_test_project
+        run: .\..\target\release\kite.exe build --freestanding
+
+      - name: kite build --lib produces an object file + C header
+        working-directory: smoke_test_project
+        run: .\..\target\release\kite.exe build --lib

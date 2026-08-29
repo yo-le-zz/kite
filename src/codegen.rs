@@ -131,6 +131,17 @@ fn collect_string_constants(func: &IrFunction, ctx: &mut ModuleCtx) {
             }
             IrInstr::ListAppend { value, .. } => visit(value, ctx),
             IrInstr::StrLen { value, .. } => visit(value, ctx),
+            IrInstr::CharAt { value, index, .. } => {
+                visit(value, ctx);
+                visit(index, ctx);
+            }
+            IrInstr::Substr {
+                value, start, end, ..
+            } => {
+                visit(value, ctx);
+                visit(start, ctx);
+                visit(end, ctx);
+            }
             IrInstr::BinOp { lhs, rhs, .. } => {
                 visit(lhs, ctx);
                 visit(rhs, ctx);
@@ -321,6 +332,55 @@ fn emit_instr(instr: &IrInstr, fctx: &mut FnCtx, is_main: bool, out: &mut String
         IrInstr::StrLen { dest, value } => {
             let (v, _) = emit_value(value, fctx, &IrType::Str, out);
             let _ = writeln!(out, "  %t{dest} = call i64 @strlen(i8* {v})");
+        }
+        IrInstr::CharAt { dest, value, index } => {
+            let (v, _) = emit_value(value, fctx, &IrType::Str, out);
+            let (i, _) = emit_value(index, fctx, &IrType::I64, out);
+            let idx0 = fresh_reg_name();
+            let _ = writeln!(out, "  {idx0} = sub i64 {i}, 1");
+            let ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {ptr} = getelementptr inbounds i8, i8* {v}, i64 {idx0}"
+            );
+            let byte = fresh_reg_name();
+            let _ = writeln!(out, "  {byte} = load i8, i8* {ptr}");
+            let _ = writeln!(out, "  %t{dest} = zext i8 {byte} to i64");
+        }
+        IrInstr::Substr {
+            dest,
+            value,
+            start,
+            end,
+        } => {
+            let (v, _) = emit_value(value, fctx, &IrType::Str, out);
+            let (s, _) = emit_value(start, fctx, &IrType::I64, out);
+            let (e, _) = emit_value(end, fctx, &IrType::I64, out);
+
+            let s0 = fresh_reg_name();
+            let _ = writeln!(out, "  {s0} = sub i64 {s}, 1");
+            let len = fresh_reg_name();
+            let _ = writeln!(out, "  {len} = sub i64 {e}, {s0}");
+            let alloc_len = fresh_reg_name();
+            let _ = writeln!(out, "  {alloc_len} = add i64 {len}, 1");
+            let raw = fresh_ptr_name();
+            let _ = writeln!(out, "  {raw} = call i8* @malloc(i64 {alloc_len})");
+            let src_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {src_ptr} = getelementptr inbounds i8, i8* {v}, i64 {s0}"
+            );
+            let _ = writeln!(
+                out,
+                "  call i8* @memcpy(i8* {raw}, i8* {src_ptr}, i64 {len})"
+            );
+            let nul_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {nul_ptr} = getelementptr inbounds i8, i8* {raw}, i64 {len}"
+            );
+            let _ = writeln!(out, "  store i8 0, i8* {nul_ptr}");
+            let _ = writeln!(out, "  %t{dest} = bitcast i8* {raw} to i8*");
         }
         IrInstr::BinOp { dest, op, lhs, rhs } => emit_binop(*dest, *op, lhs, rhs, fctx, out),
         IrInstr::Neg { dest, value, ty } => {

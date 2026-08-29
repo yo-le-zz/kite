@@ -1,5 +1,5 @@
-dc57ccc4becdc0fab21c4682f32943fa47afdb412573dca80fb22d874cdfd00d  kite-0.1.0-linux-x64.tar.gz
-5ec85df3208117dd3bfaddef40ce5589d1bc5a694a986614f8fd8ccb347ac19d  kite-0.1.0-linux-x64-musl.tar.gz
-63bbb8b299ba38be00939db0cbaa60fb6f3fbb1e73913f0539e23edfb602af93  kite-0.1.0-linux-arm64.tar.gz
-c46acb1c700951d5b6e855946835c9105a038a1c83afdb9b3804cbee2e2f0ffb  kite-0.1.0-linux-arm64-musl.tar.gz
-8cdca4a517a6a951b6b6b85a33724566200b106fca9038c9df099c29580ad2f4  kite-0.1.0-windows-x64.zip
+988e3a09e2d563c9288628e4f9afae0b54e59a4210ca482beb0f5d4bd2e262b5  kite-0.1.1-linux-x64.tar.gz
+9f439f00fb8a7aca50e55b2cd4298d90ae7a9ecca7f723847ff5f49621007aa2  kite-0.1.1-linux-x64-musl.tar.gz
+a3b6446749c59e15e79b5a8c3860a984e93f322a87afe69d2b7d4a84e044f746  kite-0.1.1-linux-arm64.tar.gz
+14fdf0edae63203402146d17875808f218b95489a098ff62215d8c45968c7117  kite-0.1.1-linux-arm64-musl.tar.gz
+facf755f714ebab90e0faba930b89f339bfbe6bdc3290e201dfb0de0f486e79c  kite-0.1.1-windows-x64.zip

@@ -205,3 +205,62 @@ fn enum_used_as_function_parameter_type_checks() {
         "enum Color:\n    Red\n    Green\n\nmake is_red(c: Color) -> bool:\n    return c == Color.Red\n\nmake main():\n    print(is_red(Color.Red))\n",
     );
 }
+
+#[test]
+fn char_at_and_substr_type_check() {
+    check_ok("make main():\n    s = \"hello\"\n    c = char_at(s, 1)\n    t = substr(s, 1, 3)\n    print(c)\n    print(t)\n");
+}
+
+#[test]
+fn char_at_rejects_non_string() {
+    let errors = check_err("make main():\n    x = char_at(5, 1)\n");
+    assert!(!errors.is_empty());
+}
+
+#[test]
+fn substr_rejects_non_int_bounds() {
+    let errors = check_err("make main():\n    s = \"hello\"\n    x = substr(s, \"a\", 3)\n");
+    assert!(!errors.is_empty());
+}
+
+#[test]
+fn try_block_that_always_returns_satisfies_missing_return_check() {
+    // Regression test: a `try` statement always reported "falls through"
+    // regardless of whether its try_block actually returned on every
+    // path, causing a false-positive "does not return a value on all
+    // paths" error for functions whose only statement was a
+    // try/finally that itself always returned.
+    check_ok(
+        "make f() -> int:\n    try:\n        return 1\n    finally:\n        print(\"cleanup\")\n\nmake main():\n    print(f())\n",
+    );
+}
+
+#[test]
+fn try_block_that_sometimes_falls_through_still_requires_a_final_return() {
+    let errors = check_err(
+        "make f() -> int:\n    try:\n        if true:\n            return 1\n    finally:\n        print(\"cleanup\")\n\nmake main():\n    print(f())\n",
+    );
+    assert!(!errors.is_empty());
+}
+
+#[test]
+fn if_without_else_and_no_fallback_return_is_a_missing_return_error() {
+    // Regression test: `if cond: return x` with no `else` and nothing
+    // after it used to silently pass semantic analysis -- the
+    // fall-through computation for if/orif/else ANDed branch results
+    // together (and treated a missing `else` as "guarantees a return"),
+    // when it should OR them (any branch that can fall through means
+    // the whole statement can) and treat a missing `else` as always
+    // falling through.
+    let errors = check_err("make f(n: int) -> int:\n    if n > 0:\n        return 1\n\nmake main():\n    print(f(5))\n");
+    assert!(errors
+        .iter()
+        .any(|e| e.contains("does not return a value on all paths")));
+}
+
+#[test]
+fn if_orif_else_all_returning_satisfies_missing_return_check() {
+    check_ok(
+        "make classify(n: int) -> string:\n    if n < 0:\n        return \"neg\"\n    orif n == 0:\n        return \"zero\"\n    else:\n        return \"pos\"\n\nmake main():\n    print(classify(1))\n",
+    );
+}

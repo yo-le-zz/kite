@@ -249,17 +249,25 @@ impl<'a> Analyzer<'a> {
             } => {
                 let cond_ty = self.check_expr(condition);
                 self.expect_bool(&cond_ty, condition.span());
-                let mut all_return = self.check_block(then_branch);
+                // A branch's own `check_block` returns "falls through"
+                // (true = might not return). The if/orif/else chain as a
+                // whole falls through if *any* branch does (any path
+                // that skips a `return` is a real path through the
+                // program) -- so this has to be an OR across branches,
+                // not an AND. A missing `else` always falls through
+                // unconditionally, since "none of the conditions held"
+                // is itself a real path that reaches no `return` at all.
+                let mut any_branch_falls_through = self.check_block(then_branch);
                 for clause in orif_branches {
                     let ty = self.check_expr(&clause.condition);
                     self.expect_bool(&ty, clause.condition.span());
-                    all_return &= self.check_block(&clause.body);
+                    any_branch_falls_through |= self.check_block(&clause.body);
                 }
                 match else_branch {
-                    Some(block) => all_return &= self.check_block(block),
-                    None => all_return = false,
+                    Some(block) => any_branch_falls_through |= self.check_block(block),
+                    None => any_branch_falls_through = true,
                 }
-                all_return
+                any_branch_falls_through
             }
             Stmt::Until {
                 condition, body, ..
@@ -347,7 +355,7 @@ impl<'a> Analyzer<'a> {
                 finally_block,
                 ..
             } => {
-                self.check_block(try_block);
+                let try_falls_through = self.check_block(try_block);
                 if let Some(fblock) = failed_block {
                     self.push_scope();
                     if let Some(name) = failed_var {
@@ -359,7 +367,7 @@ impl<'a> Analyzer<'a> {
                 if let Some(fin) = finally_block {
                     self.check_block(fin);
                 }
-                true
+                try_falls_through
             }
             Stmt::Thread { body, .. } => {
                 self.check_block(body);
@@ -864,6 +872,74 @@ impl<'a> Analyzer<'a> {
                 }
             }
             return TypeName::Int;
+        }
+
+        if name == "char_at" {
+            if args.len() != 2 {
+                self.error(
+                    "E0075",
+                    format!(
+                        "`char_at` takes exactly 2 arguments (string, index), found {}",
+                        args.len()
+                    ),
+                    span,
+                );
+            }
+            if let Some(s) = args.first() {
+                let ty = self.check_expr(s);
+                if ty != TypeName::String {
+                    self.error(
+                        "E0076",
+                        format!("`char_at` expects a string, found `{ty}`"),
+                        s.span(),
+                    );
+                }
+            }
+            if let Some(i) = args.get(1) {
+                let ty = self.check_expr(i);
+                if ty != TypeName::Int {
+                    self.error(
+                        "E0077",
+                        format!("`char_at` expects an `int` index, found `{ty}`"),
+                        i.span(),
+                    );
+                }
+            }
+            return TypeName::Int;
+        }
+
+        if name == "substr" {
+            if args.len() != 3 {
+                self.error(
+                    "E0078",
+                    format!(
+                        "`substr` takes exactly 3 arguments (string, start, end), found {}",
+                        args.len()
+                    ),
+                    span,
+                );
+            }
+            if let Some(s) = args.first() {
+                let ty = self.check_expr(s);
+                if ty != TypeName::String {
+                    self.error(
+                        "E0079",
+                        format!("`substr` expects a string, found `{ty}`"),
+                        s.span(),
+                    );
+                }
+            }
+            for a in args.iter().skip(1) {
+                let ty = self.check_expr(a);
+                if ty != TypeName::Int {
+                    self.error(
+                        "E0080",
+                        format!("`substr` expects `int` bounds, found `{ty}`"),
+                        a.span(),
+                    );
+                }
+            }
+            return TypeName::String;
         }
 
         // Struct construction: `User()`.

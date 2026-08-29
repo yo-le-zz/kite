@@ -1,11 +1,11 @@
 # Roadmap
 
-Kite v0.1.0 is a real, working ahead-of-time compiler with a full
+Kite v0.1.1 is a real, working ahead-of-time compiler with a full
 pipeline down to native executables -- not a mockup. It also makes a
 number of explicit, documented scope cuts to stay shippable. This page is
 the honest list of what's implemented today versus what's next.
 
-## What v0.1.0 has today
+## What v0.1.1 has today
 
 - Indentation-based syntax; no braces, no semicolons.
 - Type inference for variables, with optional explicit annotation.
@@ -37,6 +37,46 @@ the honest list of what's implemented today versus what's next.
   `kite.toml`/`kite.lock` locally.
 - A full test suite: lexer, parser, semantic analysis, codegen (IR shape),
   LLVM backend (actually compiles and runs programs), and CLI tests.
+- A first, real step toward self-hosting: `../../bootstrap` is a lexer
+  for Kite, written in Kite, that successfully tokenizes its own source
+  file. Not a full self-hosted compiler yet -- see that directory's
+  README for exactly what's there and what Kite still needs before a
+  parser/codegen stage is realistic.
+
+## Bugs found by bootstrapping
+
+Writing real Kite code by hand -- specifically, the self-hosted lexer in
+`../../bootstrap` -- surfaced three genuine miscompilation/false-positive
+bugs in this compiler that its own test suite hadn't happened to
+exercise, all now fixed with regression tests:
+
+- **`or` with three or more chained operands was miscompiled.** The
+  short-circuit branch polarity for `or` reused `and`'s (correct only
+  for `and`), so `a or b or c` evaluated to `true` the moment the first
+  operand was false, and to the *second* operand's value (ignoring that
+  the first was true) when the first was true. See
+  `or_short_circuits_correctly_with_three_or_more_operands` in
+  `tests/llvm_backend_tests.rs`.
+- **`try`/`finally` always reported "falls through," ignoring whether
+  `try` itself always returned.** A function whose only statement was a
+  `try: return x` / `finally: ...` was incorrectly rejected as "does not
+  return a value on all paths." See
+  `try_block_that_always_returns_satisfies_missing_return_check` in
+  `tests/semantic_tests.rs`.
+- **`if`/`orif`/`else` missing-return detection used the wrong boolean
+  operator.** It ANDed branch fall-through results together (and
+  treated a missing `else` as "guarantees a return") when it needed to
+  OR them (any branch that can fall through means the whole statement
+  can) and treat a missing `else` as *always* falling through. In
+  practice, an `if` with no `else` and nothing after it (e.g. `make
+  f(n: int) -> int:` / `    if n > 0:` / `        return 1`) silently
+  passed semantic analysis instead of being rejected. See
+  `if_without_else_and_no_fallback_return_is_a_missing_return_error` in
+  `tests/semantic_tests.rs`.
+
+This is exactly the case for self-hosting work being valuable well
+before it's complete: it's real code, under real pressure, in a way a
+hand-picked test suite never quite is.
 
 ## v0.2: aggregates everywhere
 

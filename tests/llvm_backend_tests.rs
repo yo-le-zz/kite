@@ -270,3 +270,36 @@ fn kite_lib_produces_object_and_header_callable_from_c() {
     assert!(output.status.success());
     assert_eq!(String::from_utf8_lossy(&output.stdout), "36\n");
 }
+
+#[test]
+fn char_at_and_substr_work() {
+    let source = "make main():\n    s = \"hello world\"\n    print(len(s))\n    print(char_at(s, 1))\n    print(substr(s, 1, 5))\n    print(substr(s, 7, 11))\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "11\n104\nhello\nworld\n");
+}
+
+#[test]
+fn substr_full_string_round_trips() {
+    let source = "make main():\n    s = \"kite\"\n    t = substr(s, 1, len(s))\n    print(t)\n    print(t == s)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "kite\ntrue\n");
+}
+
+#[test]
+fn or_short_circuits_correctly_with_three_or_more_operands() {
+    // Regression test: `or` chains longer than two operands were
+    // miscompiled -- the short-circuit branch polarity for `or` reused
+    // `and`'s (correct only for `and`), so `a or b or c` evaluated to
+    // `true` the moment the *first* operand was false, and to the
+    // *second* operand's value (ignoring that the first was true) when
+    // the first operand was true.
+    let source = "make is_space(c: int) -> bool:\n    return c == 32 or c == 9 or c == 13 or c == 10\n\nmake main():\n    print(is_space(32))\n    print(is_space(109))\n    print(is_space(10))\n    print(1 == 2 or 3 == 3 or 4 == 5)\n    print(1 == 2 or 3 == 4 or 5 == 6)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "true\nfalse\ntrue\ntrue\nfalse\n");
+}

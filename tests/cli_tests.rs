@@ -42,6 +42,29 @@ fn init_creates_project_scaffold() {
 }
 
 #[test]
+fn init_with_an_absolute_path_names_the_package_after_the_directory() {
+    // Regression test: `kite init` used to take the *entire* path
+    // string as the package name, so `kite init /tmp/foo` produced a
+    // `kite.toml` with `name = "/tmp/foo"`. Besides being a nonsense
+    // package name, this silently broke every subsequent build:
+    // `Project::output_binary_path` does `build_dir().join(&name)`,
+    // and joining an absolute-looking path component onto another path
+    // replaces it outright (`PathBuf` semantics), so the compiled
+    // binary's output path collided with the project directory itself.
+    let dir = tempdir().unwrap();
+    let project = dir.path().join("abs_init_target");
+    kite()
+        .args(["init", project.to_str().unwrap()])
+        .assert()
+        .success();
+
+    assert!(project.join("kite.toml").is_file());
+    let manifest = std::fs::read_to_string(project.join("kite.toml")).unwrap();
+    assert!(manifest.contains("name = \"abs_init_target\""));
+    assert!(!manifest.contains(project.to_str().unwrap()));
+}
+
+#[test]
 fn init_refuses_to_overwrite_existing_project() {
     let dir = tempdir().unwrap();
     kite()

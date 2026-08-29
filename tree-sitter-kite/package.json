@@ -1,6 +1,6 @@
 {
   "name": "tree-sitter-kite",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Tree-sitter grammar for the Kite programming language",
   "main": "bindings/node",
   "repository": "https://github.com/yo-le-zz/tree-sitter-kite",
@@ -8,7 +8,7 @@
   "author": "yo-le-zz",
   "keywords": ["parser", "lexer", "kite"],
   "scripts": {
-    "generate": "tree-sitter generate",
+    "generate": "tree-sitter generate --abi=14",
     "test": "tree-sitter test",
     "build": "tree-sitter build"
   },

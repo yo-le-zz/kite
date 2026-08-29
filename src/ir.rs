@@ -220,6 +220,20 @@ pub enum IrInstr {
         dest: Temp,
         value: IrValue,
     },
+    /// `char_at(string, i)` -- byte value at a 1-based index.
+    CharAt {
+        dest: Temp,
+        value: IrValue,
+        index: IrValue,
+    },
+    /// `substr(string, start, end)` -- 1-based, inclusive on both ends;
+    /// allocates a new heap buffer for the result.
+    Substr {
+        dest: Temp,
+        value: IrValue,
+        start: IrValue,
+        end: IrValue,
+    },
     BinOp {
         dest: Temp,
         op: IrBinOp,
@@ -518,7 +532,8 @@ fn quick_expr_type(expr: &ast::Expr, sigs: &HashMap<String, IrType>) -> Option<I
         ast::Expr::Binary { .. } => Some(IrType::Bool),
         ast::Expr::Unary { op: UnOp::Not, .. } => Some(IrType::Bool),
         ast::Expr::Unary { expr, .. } => quick_expr_type(expr, sigs),
-        ast::Expr::Call { name, .. } if name == "len" => Some(IrType::I64),
+        ast::Expr::Call { name, .. } if name == "len" || name == "char_at" => Some(IrType::I64),
+        ast::Expr::Call { name, .. } if name == "substr" => Some(IrType::Str),
         ast::Expr::Call { name, .. } => sigs.get(name).cloned(),
         ast::Expr::Await { expr, .. } => quick_expr_type(expr, sigs),
         _ => None,
@@ -1564,10 +1579,21 @@ impl FunctionLowerer {
         let short_label = self.fresh_label("sc.short");
         let end_label = self.fresh_label("sc.end");
 
+        // `a and b`: if `a` is true, the result depends on `b` (go
+        // evaluate it); if `a` is false, short-circuit to `false`.
+        // `a or b`: if `a` is true, short-circuit to `true` immediately;
+        // if `a` is false, the result depends on `b` (go evaluate it).
+        // These are opposite branch directions for the same two labels,
+        // so which one is "then" vs "else" has to depend on `op`.
+        let (true_target, false_target) = match op {
+            BinOp::And => (rhs_label.clone(), short_label.clone()),
+            BinOp::Or => (short_label.clone(), rhs_label.clone()),
+            _ => unreachable!("lower_short_circuit only called for And/Or"),
+        };
         self.body.push(IrInstr::Branch {
             cond: lval,
-            then_label: rhs_label.clone(),
-            else_label: short_label.clone(),
+            then_label: true_target,
+            else_label: false_target,
         });
 
         self.body.push(IrInstr::Label(rhs_label));
@@ -1630,6 +1656,32 @@ impl FunctionLowerer {
                 }
             }
             return (IrValue::Temp(dest), IrType::I64);
+        }
+
+        if name == "char_at" {
+            let (s, _) = self.lower_expr(&args[0]);
+            let (i, _) = self.lower_expr(&args[1]);
+            let dest = self.fresh_temp();
+            self.body.push(IrInstr::CharAt {
+                dest,
+                value: s,
+                index: i,
+            });
+            return (IrValue::Temp(dest), IrType::I64);
+        }
+
+        if name == "substr" {
+            let (s, _) = self.lower_expr(&args[0]);
+            let (start, _) = self.lower_expr(&args[1]);
+            let (end, _) = self.lower_expr(&args[2]);
+            let dest = self.fresh_temp();
+            self.body.push(IrInstr::Substr {
+                dest,
+                value: s,
+                start,
+                end,
+            });
+            return (IrValue::Temp(dest), IrType::Str);
         }
 
         let mut arg_vals = Vec::new();
