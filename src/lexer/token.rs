@@ -1,6 +1,6 @@
 //! Token kinds produced by the lexer.
 //!
-//! Kite v0.1.1 uses Python-style indentation to delimit blocks, so the
+//! Kite v0.1.2 uses Python-style indentation to delimit blocks, so the
 //! token stream includes structural `Newline`/`Indent`/`Dedent` tokens in
 //! addition to the usual lexical categories.
 

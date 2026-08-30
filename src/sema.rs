@@ -744,6 +744,9 @@ impl<'a> Analyzer<'a> {
         use BinOp::*;
         match op {
             Add | Sub | Mul | Div | Mod => {
+                if op == Add && lty == TypeName::String && rty == TypeName::String {
+                    return TypeName::String;
+                }
                 if lty != rty || (lty != TypeName::Int && lty != TypeName::Float) {
                     self.error(
                         "E0027",
@@ -935,6 +938,104 @@ impl<'a> Analyzer<'a> {
                     self.error(
                         "E0080",
                         format!("`substr` expects `int` bounds, found `{ty}`"),
+                        a.span(),
+                    );
+                }
+            }
+            return TypeName::String;
+        }
+
+        if name == "read_file" {
+            if args.len() != 1 {
+                self.error(
+                    "E0081",
+                    format!(
+                        "`read_file` takes exactly 1 argument (path), found {}",
+                        args.len()
+                    ),
+                    span,
+                );
+            }
+            if let Some(a) = args.first() {
+                let ty = self.check_expr(a);
+                if ty != TypeName::String {
+                    self.error(
+                        "E0082",
+                        format!("`read_file` expects a string path, found `{ty}`"),
+                        a.span(),
+                    );
+                }
+            }
+            // No real error type exists yet (see docs/architecture.md) --
+            // a missing/unreadable file yields `""` rather than aborting
+            // or raising. Callers that need to tell "empty file" apart
+            // from "couldn't open it" have no way to today; that's a
+            // real gap, not an oversight.
+            return TypeName::String;
+        }
+
+        if name == "write_file" {
+            if args.len() != 2 {
+                self.error(
+                    "E0083",
+                    format!(
+                        "`write_file` takes exactly 2 arguments (path, content), found {}",
+                        args.len()
+                    ),
+                    span,
+                );
+            }
+            if let Some(a) = args.first() {
+                let ty = self.check_expr(a);
+                if ty != TypeName::String {
+                    self.error(
+                        "E0084",
+                        format!("`write_file` expects a string path, found `{ty}`"),
+                        a.span(),
+                    );
+                }
+            }
+            if let Some(a) = args.get(1) {
+                let ty = self.check_expr(a);
+                if ty != TypeName::String {
+                    self.error(
+                        "E0085",
+                        format!("`write_file` expects string content, found `{ty}`"),
+                        a.span(),
+                    );
+                }
+            }
+            return TypeName::Bool;
+        }
+
+        if name == "arg_count" {
+            if !args.is_empty() {
+                self.error(
+                    "E0086",
+                    format!("`arg_count` takes no arguments, found {}", args.len()),
+                    span,
+                );
+            }
+            return TypeName::Int;
+        }
+
+        if name == "arg" {
+            if args.len() != 1 {
+                self.error(
+                    "E0087",
+                    format!(
+                        "`arg` takes exactly 1 argument (a 1-based index), found {}",
+                        args.len()
+                    ),
+                    span,
+                );
+            }
+            if let Some(a) = args.first() {
+                let ty = self.check_expr(a);
+                if ty != TypeName::Int {
+                    self.error(
+                        "E0088",
+                        format!("`arg` expects an `int` index, found `{ty}`"),
                         a.span(),
                     );
                 }

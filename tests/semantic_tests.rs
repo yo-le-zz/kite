@@ -264,3 +264,49 @@ fn if_orif_else_all_returning_satisfies_missing_return_check() {
         "make classify(n: int) -> string:\n    if n < 0:\n        return \"neg\"\n    orif n == 0:\n        return \"zero\"\n    else:\n        return \"pos\"\n\nmake main():\n    print(classify(1))\n",
     );
 }
+
+#[test]
+fn strings_can_be_concatenated_with_plus() {
+    check_ok("make main():\n    a = \"foo\"\n    b = \"bar\"\n    c = a + b\n    print(c)\n");
+}
+
+#[test]
+fn concatenating_a_string_with_a_non_string_is_a_type_error() {
+    let errors =
+        check_err("make main():\n    a = \"foo\"\n    b = 1\n    c = a + b\n    print(c)\n");
+    assert!(errors
+        .iter()
+        .any(|e| e.contains("cannot apply arithmetic operator")));
+}
+
+#[test]
+fn subtracting_two_strings_is_still_a_type_error() {
+    // `+` grew a string overload; the other arithmetic operators
+    // deliberately did not.
+    let errors =
+        check_err("make main():\n    a = \"foo\"\n    b = \"bar\"\n    c = a - b\n    print(c)\n");
+    assert!(errors
+        .iter()
+        .any(|e| e.contains("cannot apply arithmetic operator")));
+}
+
+#[test]
+fn read_file_write_file_arg_and_arg_count_type_check() {
+    check_ok("make main():\n    content = read_file(\"a.txt\")\n    ok = write_file(\"b.txt\", content)\n    print(ok)\n    n = arg_count()\n    if n >= 1:\n        print(arg(1))\n");
+}
+
+#[test]
+fn read_file_rejects_a_non_string_path() {
+    let errors = check_err("make main():\n    content = read_file(1)\n    print(content)\n");
+    assert!(errors
+        .iter()
+        .any(|e| e.contains("`read_file` expects a string path")));
+}
+
+#[test]
+fn arg_rejects_a_non_int_index() {
+    let errors = check_err("make main():\n    print(arg(\"1\"))\n");
+    assert!(errors
+        .iter()
+        .any(|e| e.contains("`arg` expects an `int` index")));
+}

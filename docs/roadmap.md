@@ -1,11 +1,11 @@
 # Roadmap
 
-Kite v0.1.1 is a real, working ahead-of-time compiler with a full
+Kite v0.1.2 is a real, working ahead-of-time compiler with a full
 pipeline down to native executables -- not a mockup. It also makes a
 number of explicit, documented scope cuts to stay shippable. This page is
 the honest list of what's implemented today versus what's next.
 
-## What v0.1.1 has today
+## What v0.1.2 has today
 
 - Indentation-based syntax; no braces, no semicolons.
 - Type inference for variables, with optional explicit annotation.

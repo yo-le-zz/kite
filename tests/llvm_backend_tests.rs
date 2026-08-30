@@ -35,6 +35,28 @@ fn run_kite_program(source: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&output.stdout).to_string())
 }
 
+/// Like [`run_kite_program`], but forwards `args` as the compiled
+/// program's own command-line arguments (for exercising `arg`/
+/// `arg_count`).
+fn run_kite_program_with_args(source: &str, args: &[&str]) -> Option<String> {
+    if !clang_available() {
+        eprintln!("skipping: clang not found on PATH");
+        return None;
+    }
+    let dir = tempdir().expect("tempdir");
+    let output_path = dir.path().join("program");
+    build_executable("test.ki", source, &output_path, 0, None).expect("build_executable failed");
+    let output = Command::new(&output_path)
+        .args(args)
+        .output()
+        .expect("failed to run compiled program");
+    assert!(
+        output.status.success(),
+        "program exited non-zero: {output:?}"
+    );
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
 #[test]
 fn hello_world_prints_and_runs() {
     let Some(stdout) = run_kite_program("make main():\n    print(\"Hello, Kite!\")\n") else {
@@ -290,6 +312,28 @@ fn substr_full_string_round_trips() {
 }
 
 #[test]
+fn string_concatenation_with_plus() {
+    let source = "make greet(name: string) -> string:\n    return \"Hello, \" + name + \"!\"\n\nmake main():\n    print(greet(\"Kite\"))\n    a = \"foo\"\n    b = \"bar\"\n    c = a + b\n    print(c)\n    print(len(c))\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "Hello, Kite!\nfoobar\n6\n");
+}
+
+#[test]
+fn concatenation_result_is_independently_addressable_from_its_operands() {
+    // The concatenated buffer must be a fresh allocation, not an alias
+    // into either operand -- building a second concatenation from the
+    // same left-hand operand must not change a previously-produced
+    // result.
+    let source = "make main():\n    a = \"ab\"\n    b = \"cd\"\n    first = a + b\n    second = a + \"XY\"\n    print(first)\n    print(second)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "abcd\nabXY\n");
+}
+
+#[test]
 fn or_short_circuits_correctly_with_three_or_more_operands() {
     // Regression test: `or` chains longer than two operands were
     // miscompiled -- the short-circuit branch polarity for `or` reused
@@ -302,4 +346,58 @@ fn or_short_circuits_correctly_with_three_or_more_operands() {
         return;
     };
     assert_eq!(stdout, "true\nfalse\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn write_file_then_read_file_round_trips() {
+    if !clang_available() {
+        eprintln!("skipping: clang not found on PATH");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("roundtrip.txt");
+    let path_str = path.to_str().expect("tempdir path is valid UTF-8");
+    let source = format!(
+        "make main():\n    ok = write_file(\"{path}\", \"hello from kite\\n\")\n    print(ok)\n    content = read_file(\"{path}\")\n    print(content)\n",
+        path = path_str.replace('\\', "\\\\")
+    );
+    let output_path = dir.path().join("program");
+    build_executable("test.ki", &source, &output_path, 0, None).expect("build_executable failed");
+    let output = Command::new(&output_path)
+        .output()
+        .expect("failed to run compiled program");
+    assert!(
+        output.status.success(),
+        "program exited non-zero: {output:?}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert_eq!(stdout, "true\nhello from kite\n\n");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello from kite\n");
+}
+
+#[test]
+fn read_file_on_a_missing_path_yields_an_empty_string() {
+    let source = "make main():\n    content = read_file(\"/this/path/definitely/does/not/exist/kite-test.txt\")\n    print(len(content))\n    print(content)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "0\n\n");
+}
+
+#[test]
+fn arg_count_and_arg_reflect_real_command_line_arguments() {
+    let source = "make main():\n    print(arg_count())\n    i = 1\n    until i > arg_count():\n        print(arg(i))\n        i = i + 1\n";
+    let Some(stdout) = run_kite_program_with_args(source, &["foo", "bar", "baz"]) else {
+        return;
+    };
+    assert_eq!(stdout, "3\nfoo\nbar\nbaz\n");
+}
+
+#[test]
+fn arg_count_is_zero_with_no_arguments() {
+    let source = "make main():\n    print(arg_count())\n";
+    let Some(stdout) = run_kite_program_with_args(source, &[]) else {
+        return;
+    };
+    assert_eq!(stdout, "0\n");
 }

@@ -45,7 +45,14 @@ fn emits_printf_declaration() {
 #[test]
 fn main_returns_i32_for_c_entry_point() {
     let ir = compile_to_llvm_ir("make main():\n    return\n");
-    assert!(ir.contains("define i32 @main()"), "IR was:\n{ir}");
+    // `main` now takes the C runtime's real `argc`/`argv` (rather than
+    // `i32 @main()`) so `arg`/`arg_count` have something to read -- see
+    // the doc comment on `emit_function`'s `is_main` handling in
+    // `src/codegen.rs`.
+    assert!(
+        ir.contains("define i32 @main(i32 %argc, i8** %argv)"),
+        "IR was:\n{ir}"
+    );
 }
 
 #[test]

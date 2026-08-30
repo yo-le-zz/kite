@@ -22,7 +22,7 @@ Kite is:
 
 This repository is the reference compiler: `kite`, written in Rust.
 
-> **Status:** v0.1.1. This is a real, working compiler with a full
+> **Status:** v0.1.2. This is a real, working compiler with a full
 > pipeline (lexer -> parser -> semantic analysis -> IR -> LLVM codegen ->
 > native executable) -- not a toy or a mockup. It also has real, documented
 > limitations; see [`docs/roadmap.md`](docs/roadmap.md) for what's next.
@@ -357,6 +357,9 @@ snapshot. There is no package registry to resolve against yet in v0.1 --
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) -- how the compiler is built, stage by stage.
+- [`docs/builtins.md`](docs/builtins.md) -- every built-in function (`print`, `read_file`, string `+`, ...), with examples.
+- [`docs/memory.md`](docs/memory.md) -- how memory works: nothing to manage for everyday code, full detail for advanced use.
+- [`docs/style.md`](docs/style.md) -- tabs vs. spaces, and other style notes.
 - [`docs/c-interop.md`](docs/c-interop.md) -- calling C from Kite, and Kite from C.
 - [`docs/roadmap.md`](docs/roadmap.md) -- what's implemented today, and what's next.
 - [`editors/zed/`](editors/zed/) -- syntax highlighting for Zed (grammar: [`tree-sitter-kite/`](tree-sitter-kite/)); see [`docs/zed-extension-publishing.md`](docs/zed-extension-publishing.md) to publish it.

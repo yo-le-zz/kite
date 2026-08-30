@@ -147,6 +147,7 @@ pub enum IrBinOp {
     GeF,
     EqStr,
     NeStr,
+    ConcatStr,
 }
 
 /// The compile-time-known shape of an aggregate local, recorded at the
@@ -233,6 +234,38 @@ pub enum IrInstr {
         value: IrValue,
         start: IrValue,
         end: IrValue,
+    },
+    /// `read_file(path)` -- reads the whole file into a fresh heap
+    /// buffer. On any failure (missing file, permissions, ...) yields
+    /// `""` rather than aborting -- pair with `file_exists`/checking
+    /// `len(...) == 0` to detect that, since v0.1.2 has no real error
+    /// type to raise instead (see `docs/architecture.md`).
+    ReadFile {
+        dest: Temp,
+        path: IrValue,
+    },
+    /// `write_file(path, content)` -- overwrites (or creates) `path`
+    /// with `content`. Returns whether the write succeeded.
+    WriteFile {
+        dest: Temp,
+        path: IrValue,
+        content: IrValue,
+    },
+    /// `arg_count()` -- number of user-supplied command-line arguments
+    /// (`argc - 1`; the program's own path in `argv[0]` isn't counted,
+    /// matching Python's `sys.argv[1:]`).
+    ArgCount {
+        dest: Temp,
+    },
+    /// `arg(i)` -- the `i`-th user-supplied command-line argument,
+    /// 1-based (`arg(1)` is `argv[1]`), consistent with every other
+    /// 1-based indexing operation in Kite (lists, `char_at`, `substr`).
+    /// Out-of-range `i` aborts the same way an out-of-range list index
+    /// does (see `emit_bounds_check`-style checks in codegen), rather
+    /// than reading past `argv`.
+    Arg {
+        dest: Temp,
+        index: IrValue,
     },
     BinOp {
         dest: Temp,
@@ -534,6 +567,9 @@ fn quick_expr_type(expr: &ast::Expr, sigs: &HashMap<String, IrType>) -> Option<I
         ast::Expr::Unary { expr, .. } => quick_expr_type(expr, sigs),
         ast::Expr::Call { name, .. } if name == "len" || name == "char_at" => Some(IrType::I64),
         ast::Expr::Call { name, .. } if name == "substr" => Some(IrType::Str),
+        ast::Expr::Call { name, .. } if name == "read_file" || name == "arg" => Some(IrType::Str),
+        ast::Expr::Call { name, .. } if name == "write_file" => Some(IrType::Bool),
+        ast::Expr::Call { name, .. } if name == "arg_count" => Some(IrType::I64),
         ast::Expr::Call { name, .. } => sigs.get(name).cloned(),
         ast::Expr::Await { expr, .. } => quick_expr_type(expr, sigs),
         _ => None,
@@ -1480,6 +1516,7 @@ impl FunctionLowerer {
         let is_str = lty == IrType::Str;
 
         let (ir_op, result_ty) = match op {
+            BinOp::Add if is_str => (IrBinOp::ConcatStr, IrType::Str),
             BinOp::Add => (
                 if is_float {
                     IrBinOp::AddF
@@ -1681,6 +1718,38 @@ impl FunctionLowerer {
                 start,
                 end,
             });
+            return (IrValue::Temp(dest), IrType::Str);
+        }
+
+        if name == "read_file" {
+            let (path, _) = self.lower_expr(&args[0]);
+            let dest = self.fresh_temp();
+            self.body.push(IrInstr::ReadFile { dest, path });
+            return (IrValue::Temp(dest), IrType::Str);
+        }
+
+        if name == "write_file" {
+            let (path, _) = self.lower_expr(&args[0]);
+            let (content, _) = self.lower_expr(&args[1]);
+            let dest = self.fresh_temp();
+            self.body.push(IrInstr::WriteFile {
+                dest,
+                path,
+                content,
+            });
+            return (IrValue::Temp(dest), IrType::Bool);
+        }
+
+        if name == "arg_count" {
+            let dest = self.fresh_temp();
+            self.body.push(IrInstr::ArgCount { dest });
+            return (IrValue::Temp(dest), IrType::I64);
+        }
+
+        if name == "arg" {
+            let (index, _) = self.lower_expr(&args[0]);
+            let dest = self.fresh_temp();
+            self.body.push(IrInstr::Arg { dest, index });
             return (IrValue::Temp(dest), IrType::Str);
         }
 

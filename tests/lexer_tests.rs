@@ -120,9 +120,11 @@ fn unterminated_string_reports_diagnostic() {
 }
 
 #[test]
-fn tabs_for_indentation_are_rejected() {
+fn tabs_for_indentation_are_accepted() {
+    // Previously rejected outright; tabs are now a first-class
+    // indentation style alongside spaces (see `docs/style.md`).
     let (_, diags) = lex("make main():\n\tx = 1\n");
-    assert!(diags.had_errors());
+    assert!(!diags.had_errors(), "unexpected diagnostics: {diags:?}");
 }
 
 #[test]
@@ -149,5 +151,69 @@ fn operators_tokenize_correctly() {
             TokenKind::Newline,
             TokenKind::Eof,
         ]
+    );
+}
+
+#[test]
+fn tabs_indent_just_like_spaces() {
+    let src = "make main():\n\tx = 1\n\ty = 2\n";
+    let (tokens, diags) = lex(src);
+    assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+    let kinds: Vec<_> = tokens.into_iter().map(|t| t.kind).collect();
+    assert!(kinds.contains(&TokenKind::Indent));
+    assert!(kinds.contains(&TokenKind::Dedent));
+}
+
+#[test]
+fn nested_tab_indentation_produces_two_levels() {
+    let src = "make main():\n\tif true:\n\t\tx = 1\n";
+    let (tokens, diags) = lex(src);
+    assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+    let indents = tokens
+        .iter()
+        .filter(|t| t.kind == TokenKind::Indent)
+        .count();
+    let dedents = tokens
+        .iter()
+        .filter(|t| t.kind == TokenKind::Dedent)
+        .count();
+    assert_eq!(indents, 2);
+    assert_eq!(dedents, 2);
+}
+
+#[test]
+fn a_file_can_be_entirely_tab_indented_with_no_errors() {
+    let src = "make add(a: int, b: int) -> int:\n\treturn a + b\n\nmake main():\n\tif add(2, 3) == 5:\n\t\tprint(1)\n\telse:\n\t\tprint(0)\n";
+    let (_, diags) = lex(src);
+    assert!(diags.is_empty(), "unexpected diagnostics: {diags:?}");
+}
+
+#[test]
+fn mixing_a_tab_and_spaces_at_the_same_nesting_level_is_ambiguous() {
+    // A tab-indented line followed by a sibling indented with a
+    // different number of spaces than the tab would expand to is
+    // exactly the classic Python "TabError" case -- it must still be
+    // rejected even though tabs are now accepted in general.
+    let src = "make main():\n\tif true:\n        print(1)\n";
+    let (_, diags) = lex(src);
+    assert!(
+        !diags.is_empty(),
+        "expected an inconsistent-indentation error"
+    );
+    assert!(diags.into_vec().iter().any(|d| d.code == Some("E0004")));
+}
+
+#[test]
+fn a_tab_and_eight_spaces_indenting_the_same_line_are_still_flagged() {
+    // Even though a tab expands to width 8 (matching 8 spaces) under
+    // this lexer's tab-stop rule, using a tab on one line and 8 literal
+    // spaces on a sibling line is still a mix worth flagging: nothing
+    // else in the file says that was intentional rather than an editor
+    // silently substituting one for the other.
+    let src = "make main():\n\tprint(1)\n        print(2)\n";
+    let (_, diags) = lex(src);
+    assert!(
+        !diags.is_empty(),
+        "expected an inconsistent-indentation error"
     );
 }

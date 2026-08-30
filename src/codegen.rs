@@ -55,7 +55,22 @@ pub fn emit_module(program: &IrProgram, options: &CodegenOptions) -> String {
     out.push_str("declare i8* @memcpy(i8*, i8*, i64)\n");
     out.push_str("declare i64 @strlen(i8*)\n");
     out.push_str("declare i32 @strcmp(i8*, i8*)\n");
-    out.push_str("declare void @exit(i32)\n\n");
+    out.push_str("declare void @exit(i32)\n");
+    // `read_file`/`write_file`/`arg`/`arg_count` support.
+    out.push_str("declare i8* @fopen(i8*, i8*)\n");
+    out.push_str("declare i64 @fread(i8*, i64, i64, i8*)\n");
+    out.push_str("declare i64 @fwrite(i8*, i64, i64, i8*)\n");
+    out.push_str("declare i32 @fclose(i8*)\n");
+    out.push_str("declare i32 @fseek(i8*, i64, i32)\n");
+    out.push_str("declare i64 @ftell(i8*)\n\n");
+    // Stashed by `main` at startup (hosted builds only -- see
+    // `emit_function`'s `is_main` case) so `arg`/`arg_count` can read
+    // them from any function, not just `main` itself. Zero-initialized,
+    // so calling them from a `--freestanding` build (whose `main`, if
+    // any, isn't the C runtime's entry point and never populates these)
+    // harmlessly yields `arg_count() == 0` instead of crashing.
+    out.push_str("@.kite.argc = global i32 0\n");
+    out.push_str("@.kite.argv = global i8** null\n\n");
 
     if !program.externs.is_empty() {
         out.push_str("; extern declarations (implemented outside Kite, e.g. in C)\n");
@@ -76,6 +91,13 @@ pub fn emit_module(program: &IrProgram, options: &CodegenOptions) -> String {
         "@.err.bounds",
         "kite: index %lld out of range for a list of length %lld (lists are 1-indexed)\\0A\\00",
     ));
+    out.push_str(&global_string(
+        "@.err.arg",
+        "kite: index %lld out of range for %lld command-line argument(s) (arg() is 1-indexed)\\0A\\00",
+    ));
+    out.push_str(&global_string("@.str.mode.rb", "rb\\00"));
+    out.push_str(&global_string("@.str.mode.wb", "wb\\00"));
+    out.push_str(&global_string("@.str.empty", "\\00"));
     out.push('\n');
 
     for func in &program.functions {
@@ -161,6 +183,12 @@ fn collect_string_constants(func: &IrFunction, ctx: &mut ModuleCtx) {
             IrInstr::FieldSet { value, .. } => visit(value, ctx),
             IrInstr::Branch { cond, .. } => visit(cond, ctx),
             IrInstr::Return(Some((v, _))) => visit(v, ctx),
+            IrInstr::ReadFile { path, .. } => visit(path, ctx),
+            IrInstr::WriteFile { path, content, .. } => {
+                visit(path, ctx);
+                visit(content, ctx);
+            }
+            IrInstr::Arg { index, .. } => visit(index, ctx),
             _ => {}
         }
     }
@@ -225,11 +253,22 @@ fn emit_function(func: &IrFunction, ctx: &mut ModuleCtx, freestanding: bool, out
         llvm_type(&func.return_type)
     };
 
-    let params_sig: Vec<String> = func
-        .params
-        .iter()
-        .map(|p| format!("{} %{}", llvm_type(&p.ty), p.name))
-        .collect();
+    let params_sig: Vec<String> = if is_main {
+        // Accept the C runtime's real `argc`/`argv` here (rather than
+        // emitting a no-argument `i32 @main()`) so `arg`/`arg_count` --
+        // callable from *any* function, not just `main` -- have
+        // something to read. They're stashed into `@.kite.argc`/
+        // `@.kite.argv` below rather than threaded through as
+        // parameters, since Kite functions can't take/return
+        // aggregates (or extra hidden ones) yet -- see
+        // `docs/architecture.md`.
+        vec!["i32 %argc".to_string(), "i8** %argv".to_string()]
+    } else {
+        func.params
+            .iter()
+            .map(|p| format!("{} %{}", llvm_type(&p.ty), p.name))
+            .collect()
+    };
 
     let _ = writeln!(
         out,
@@ -239,6 +278,10 @@ fn emit_function(func: &IrFunction, ctx: &mut ModuleCtx, freestanding: bool, out
         params_sig.join(", ")
     );
     out.push_str("entry:\n");
+    if is_main {
+        out.push_str("  store i32 %argc, i32* @.kite.argc\n");
+        out.push_str("  store i8** %argv, i8*** @.kite.argv\n");
+    }
 
     let mut fctx = FnCtx {
         ctx,
@@ -381,6 +424,164 @@ fn emit_instr(instr: &IrInstr, fctx: &mut FnCtx, is_main: bool, out: &mut String
             );
             let _ = writeln!(out, "  store i8 0, i8* {nul_ptr}");
             let _ = writeln!(out, "  %t{dest} = bitcast i8* {raw} to i8*");
+        }
+        IrInstr::ReadFile { dest, path } => {
+            let (p, _) = emit_value(path, fctx, &IrType::Str, out);
+            let slot = fresh_ptr_name();
+            let _ = writeln!(out, "  {slot} = alloca i8*");
+            let mode_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {mode_ptr} = getelementptr inbounds [3 x i8], [3 x i8]* @.str.mode.rb, i64 0, i64 0"
+            );
+            let fp = fresh_ptr_name();
+            let _ = writeln!(out, "  {fp} = call i8* @fopen(i8* {p}, i8* {mode_ptr})");
+            let is_null = fresh_reg_name();
+            let _ = writeln!(out, "  {is_null} = icmp eq i8* {fp}, null");
+            let fail_label = fresh_block_label("readfile.fail");
+            let ok_label = fresh_block_label("readfile.ok");
+            let after_label = fresh_block_label("readfile.after");
+            let _ = writeln!(
+                out,
+                "  br i1 {is_null}, label %{fail_label}, label %{ok_label}"
+            );
+
+            let _ = writeln!(out, "{fail_label}:");
+            let empty_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {empty_ptr} = getelementptr inbounds [1 x i8], [1 x i8]* @.str.empty, i64 0, i64 0"
+            );
+            let _ = writeln!(out, "  store i8* {empty_ptr}, i8** {slot}");
+            let _ = writeln!(out, "  br label %{after_label}");
+
+            let _ = writeln!(out, "{ok_label}:");
+            let _ = writeln!(out, "  call i32 @fseek(i8* {fp}, i64 0, i32 2)");
+            let size = fresh_reg_name();
+            let _ = writeln!(out, "  {size} = call i64 @ftell(i8* {fp})");
+            let _ = writeln!(out, "  call i32 @fseek(i8* {fp}, i64 0, i32 0)");
+            let alloc_len = fresh_reg_name();
+            let _ = writeln!(out, "  {alloc_len} = add i64 {size}, 1");
+            let buf = fresh_ptr_name();
+            let _ = writeln!(out, "  {buf} = call i8* @malloc(i64 {alloc_len})");
+            let _ = writeln!(
+                out,
+                "  call i64 @fread(i8* {buf}, i64 1, i64 {size}, i8* {fp})"
+            );
+            let end_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {end_ptr} = getelementptr inbounds i8, i8* {buf}, i64 {size}"
+            );
+            let _ = writeln!(out, "  store i8 0, i8* {end_ptr}");
+            let _ = writeln!(out, "  call i32 @fclose(i8* {fp})");
+            let _ = writeln!(out, "  store i8* {buf}, i8** {slot}");
+            let _ = writeln!(out, "  br label %{after_label}");
+
+            let _ = writeln!(out, "{after_label}:");
+            let _ = writeln!(out, "  %t{dest} = load i8*, i8** {slot}");
+        }
+        IrInstr::WriteFile {
+            dest,
+            path,
+            content,
+        } => {
+            let (p, _) = emit_value(path, fctx, &IrType::Str, out);
+            let (c, _) = emit_value(content, fctx, &IrType::Str, out);
+            let slot = fresh_ptr_name();
+            let _ = writeln!(out, "  {slot} = alloca i1");
+            let mode_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {mode_ptr} = getelementptr inbounds [3 x i8], [3 x i8]* @.str.mode.wb, i64 0, i64 0"
+            );
+            let fp = fresh_ptr_name();
+            let _ = writeln!(out, "  {fp} = call i8* @fopen(i8* {p}, i8* {mode_ptr})");
+            let is_null = fresh_reg_name();
+            let _ = writeln!(out, "  {is_null} = icmp eq i8* {fp}, null");
+            let fail_label = fresh_block_label("writefile.fail");
+            let ok_label = fresh_block_label("writefile.ok");
+            let after_label = fresh_block_label("writefile.after");
+            let _ = writeln!(
+                out,
+                "  br i1 {is_null}, label %{fail_label}, label %{ok_label}"
+            );
+
+            let _ = writeln!(out, "{fail_label}:");
+            let _ = writeln!(out, "  store i1 false, i1* {slot}");
+            let _ = writeln!(out, "  br label %{after_label}");
+
+            let _ = writeln!(out, "{ok_label}:");
+            let content_len = fresh_reg_name();
+            let _ = writeln!(out, "  {content_len} = call i64 @strlen(i8* {c})");
+            let written = fresh_reg_name();
+            let _ = writeln!(
+                out,
+                "  {written} = call i64 @fwrite(i8* {c}, i64 1, i64 {content_len}, i8* {fp})"
+            );
+            let _ = writeln!(out, "  call i32 @fclose(i8* {fp})");
+            let succeeded = fresh_reg_name();
+            let _ = writeln!(out, "  {succeeded} = icmp eq i64 {written}, {content_len}");
+            let _ = writeln!(out, "  store i1 {succeeded}, i1* {slot}");
+            let _ = writeln!(out, "  br label %{after_label}");
+
+            let _ = writeln!(out, "{after_label}:");
+            let _ = writeln!(out, "  %t{dest} = load i1, i1* {slot}");
+        }
+        IrInstr::ArgCount { dest } => {
+            let raw = fresh_reg_name();
+            let _ = writeln!(out, "  {raw} = load i32, i32* @.kite.argc");
+            let widened = fresh_reg_name();
+            let _ = writeln!(out, "  {widened} = sext i32 {raw} to i64");
+            // `arg_count()` doesn't count `argv[0]` (the program's own
+            // path) -- see the doc comment on `IrInstr::ArgCount`.
+            let _ = writeln!(out, "  %t{dest} = sub i64 {widened}, 1");
+        }
+        IrInstr::Arg { dest, index } => {
+            let (idx_val, _) = emit_value(index, fctx, &IrType::I64, out);
+            let argc_raw = fresh_reg_name();
+            let _ = writeln!(out, "  {argc_raw} = load i32, i32* @.kite.argc");
+            let argc = fresh_reg_name();
+            let _ = writeln!(out, "  {argc} = sext i32 {argc_raw} to i64");
+            let user_argc = fresh_reg_name();
+            let _ = writeln!(out, "  {user_argc} = sub i64 {argc}, 1");
+
+            let too_small = fresh_reg_name();
+            let _ = writeln!(out, "  {too_small} = icmp slt i64 {idx_val}, 1");
+            let too_big = fresh_reg_name();
+            let _ = writeln!(out, "  {too_big} = icmp sgt i64 {idx_val}, {user_argc}");
+            let out_of_range = fresh_reg_name();
+            let _ = writeln!(out, "  {out_of_range} = or i1 {too_small}, {too_big}");
+
+            let ok_label = fresh_block_label("arg.ok");
+            let fail_label = fresh_block_label("arg.fail");
+            let _ = writeln!(
+                out,
+                "  br i1 {out_of_range}, label %{fail_label}, label %{ok_label}"
+            );
+
+            let _ = writeln!(out, "{fail_label}:");
+            let err_len = string_byte_len_with_nul(
+                "kite: index %lld out of range for %lld command-line argument(s) (arg() is 1-indexed)\n",
+            );
+            let fmt_ptr = fresh_ptr_name();
+            let _ = writeln!(out, "  {fmt_ptr} = getelementptr inbounds [{err_len} x i8], [{err_len} x i8]* @.err.arg, i64 0, i64 0");
+            let _ = writeln!(
+                out,
+                "  call i32 (i8*, ...) @printf(i8* {fmt_ptr}, i64 {idx_val}, i64 {user_argc})"
+            );
+            let _ = writeln!(out, "  call void @exit(i32 1)");
+            let _ = writeln!(out, "  unreachable");
+
+            let _ = writeln!(out, "{ok_label}:");
+            let argv = fresh_ptr_name();
+            let _ = writeln!(out, "  {argv} = load i8**, i8*** @.kite.argv");
+            let elem_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {elem_ptr} = getelementptr inbounds i8*, i8** {argv}, i64 {idx_val}"
+            );
+            let _ = writeln!(out, "  %t{dest} = load i8*, i8** {elem_ptr}");
         }
         IrInstr::BinOp { dest, op, lhs, rhs } => emit_binop(*dest, *op, lhs, rhs, fctx, out),
         IrInstr::Neg { dest, value, ty } => {
@@ -840,6 +1041,41 @@ fn emit_binop(
         let _ = writeln!(out, "  %t{dest} = icmp {mnemonic} i32 {cmp}, 0");
         return;
     }
+    if op == ConcatStr {
+        // `l ++ r` (surfaced to Kite as `l + r` on two strings): malloc a
+        // fresh buffer sized for both operands plus a NUL terminator,
+        // memcpy each piece in, and null-terminate. `strlen`/`malloc`/
+        // `memcpy` are already declared for `print`/list-growth, so this
+        // needs no new runtime support.
+        let (l, _) = emit_value(lhs, fctx, &IrType::Str, out);
+        let (r, _) = emit_value(rhs, fctx, &IrType::Str, out);
+        let l_len = fresh_reg_name();
+        let r_len = fresh_reg_name();
+        let total = fresh_reg_name();
+        let total_plus_one = fresh_reg_name();
+        let tail = fresh_ptr_name();
+        let end = fresh_ptr_name();
+        let _ = writeln!(out, "  {l_len} = call i64 @strlen(i8* {l})");
+        let _ = writeln!(out, "  {r_len} = call i64 @strlen(i8* {r})");
+        let _ = writeln!(out, "  {total} = add i64 {l_len}, {r_len}");
+        let _ = writeln!(out, "  {total_plus_one} = add i64 {total}, 1");
+        let _ = writeln!(out, "  %t{dest} = call i8* @malloc(i64 {total_plus_one})");
+        let _ = writeln!(
+            out,
+            "  call i8* @memcpy(i8* %t{dest}, i8* {l}, i64 {l_len})"
+        );
+        let _ = writeln!(
+            out,
+            "  {tail} = getelementptr inbounds i8, i8* %t{dest}, i64 {l_len}"
+        );
+        let _ = writeln!(out, "  call i8* @memcpy(i8* {tail}, i8* {r}, i64 {r_len})");
+        let _ = writeln!(
+            out,
+            "  {end} = getelementptr inbounds i8, i8* %t{dest}, i64 {total}"
+        );
+        let _ = writeln!(out, "  store i8 0, i8* {end}");
+        return;
+    }
     let ty = binop_operand_type(op);
     let (l, _) = emit_value(lhs, fctx, &ty, out);
     let (r, _) = emit_value(rhs, fctx, &ty, out);
@@ -853,7 +1089,7 @@ fn binop_operand_type(op: IrBinOp) -> IrType {
     match op {
         AddI | SubI | MulI | DivI | RemI | EqI | NeI | LtI | GtI | LeI | GeI => IrType::I64,
         AddF | SubF | MulF | DivF | EqF | NeF | LtF | GtF | LeF | GeF => IrType::F64,
-        EqStr | NeStr => IrType::Str,
+        EqStr | NeStr | ConcatStr => IrType::Str,
     }
 }
 
@@ -881,7 +1117,7 @@ fn binop_mnemonic(op: IrBinOp) -> &'static str {
         GtF => "fcmp ogt",
         LeF => "fcmp ole",
         GeF => "fcmp oge",
-        EqStr | NeStr => unreachable!("handled separately in emit_binop"),
+        EqStr | NeStr | ConcatStr => unreachable!("handled separately in emit_binop"),
     }
 }
 
