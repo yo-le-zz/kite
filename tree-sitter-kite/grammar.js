@@ -64,8 +64,10 @@ module.exports = grammar({
     parameters: ($) => seq("(", optional($._newline), commaSepNL($, $.parameter), optional($._newline), ")"),
     parameter: ($) => seq(field("name", $.identifier), ":", field("type", $._type)),
 
-    _type: ($) => choice($.primitive_type, $.identifier),
+    _type: ($) => choice($.primitive_type, $.pointer_type, $.identifier),
     primitive_type: (_) => choice("int", "float", "bool", "string"),
+    // `ptr<T>` -- see docs/pointers.md in the main kite repository.
+    pointer_type: ($) => seq("ptr", "<", field("pointee", $._type), ">"),
 
     block: ($) => seq($._newline, $._indent, repeat1($._statement), $._dedent),
 
@@ -202,6 +204,16 @@ module.exports = grammar({
     unary_expression: ($) =>
       choice(
         prec(8, seq(field("operator", "-"), field("operand", $.expression))),
+        // `*p` (dereference) / `&x` (address-of) -- see
+        // docs/pointers.md in the main kite repository. `alloc(T)`/
+        // `alloc_n(T, n)`/`free(p)` deliberately aren't given their own
+        // grammar rules here: they parse fine as ordinary
+        // `call_expression`s already (`T` parses as a bare
+        // identifier-shaped argument), and a dedicated rule for them
+        // would collide with `call_expression` on the same leading
+        // tokens for no real highlighting benefit.
+        prec(8, seq(field("operator", "*"), field("operand", $.expression))),
+        prec(8, seq(field("operator", "&"), field("operand", $.expression))),
         prec(3, seq(field("operator", "not"), field("operand", $.expression))),
       ),
 
@@ -219,12 +231,17 @@ module.exports = grammar({
         $.float,
         $.string,
         $.boolean,
+        $.null_literal,
         $.identifier,
         $.list_literal,
         $.tuple_literal,
         $.dict_literal,
         $.parenthesized_expression,
       ),
+
+    // The null-pointer literal -- see docs/pointers.md in the main
+    // kite repository.
+    null_literal: (_) => "null",
 
     parenthesized_expression: ($) => seq("(", $.expression, ")"),
 

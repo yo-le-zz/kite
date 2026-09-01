@@ -383,10 +383,16 @@ impl<'a> Analyzer<'a> {
         value: &Expr,
         span: Span,
     ) {
-        let value_ty = self.check_expr(value);
-
         match target {
             LValue::Ident(name) => {
+                // `null` (see `check_expr_expecting`) needs to know what
+                // pointer type it's being assigned into *before* it's
+                // checked -- an explicit `p: ptr<int> = null` annotation
+                // if this is a fresh declaration, or `p`'s already-known
+                // type on a plain reassignment (`p = null`).
+                let expected = annotated.cloned().or_else(|| self.lookup(name));
+                let value_ty = self.check_expr_expecting(value, expected.as_ref());
+
                 if let Some(declared) = annotated {
                     if *declared != value_ty {
                         self.error(
@@ -412,7 +418,24 @@ impl<'a> Analyzer<'a> {
                 }
             }
             LValue::Field { base, field, span } => {
+                let value_ty = self.check_expr(value);
                 let base_ty = self.check_expr(base);
+                if matches!(
+                    base.as_ref(),
+                    Expr::Unary {
+                        op: UnOp::Deref,
+                        ..
+                    }
+                ) {
+                    self.error(
+                        "E0099",
+                        "assigning a field through a dereferenced pointer isn't supported yet -- \
+                         write `s = *p` first, then assign `s.field = ...` (this copies the \
+                         struct rather than mutating through `p`, see docs/pointers.md)",
+                        *span,
+                    );
+                    return;
+                }
                 if let Some(field_ty) = self.resolve_field(&base_ty, field, *span) {
                     if field_ty != value_ty {
                         self.error(
@@ -424,7 +447,23 @@ impl<'a> Analyzer<'a> {
                 }
             }
             LValue::Index { base, index, span } => {
+                let value_ty = self.check_expr(value);
                 let base_ty = self.check_expr(base);
+                if matches!(
+                    base.as_ref(),
+                    Expr::Unary {
+                        op: UnOp::Deref,
+                        ..
+                    }
+                ) {
+                    self.error(
+                        "E0099",
+                        "assigning an element through a dereferenced pointer isn't supported yet -- \
+                         write `s = *p` first, then assign `s[i] = ...`",
+                        *span,
+                    );
+                    return;
+                }
                 let elem_ty = self.check_index(&base_ty, index, *span);
                 if let Some(elem_ty) = elem_ty {
                     if elem_ty != value_ty {
@@ -436,7 +475,62 @@ impl<'a> Analyzer<'a> {
                     }
                 }
             }
+            LValue::Deref {
+                target: ptr_expr,
+                span,
+            } => {
+                let ptr_ty = self.check_expr(ptr_expr);
+                let pointee = match &ptr_ty {
+                    TypeName::Ptr(inner) => Some((**inner).clone()),
+                    other => {
+                        self.error(
+                            "E0089",
+                            format!("cannot dereference `{other}`: not a pointer"),
+                            *span,
+                        );
+                        None
+                    }
+                };
+                let value_ty = self.check_expr_expecting(value, pointee.as_ref());
+                if let Some(pointee) = pointee {
+                    if pointee != value_ty {
+                        self.error(
+                            "E0090",
+                            format!(
+                                "type mismatch: writing `{value_ty}` through a `ptr<{pointee}>`"
+                            ),
+                            *span,
+                        );
+                    }
+                }
+            }
         }
+    }
+
+    /// Like `check_expr`, but resolves `null` from `expected` (used
+    /// where the expected pointer type is already known: an annotated
+    /// or already-declared assignment target, or the other side of a
+    /// `==`/`!=` comparison) instead of always erroring on it. Every
+    /// other expression kind behaves exactly like `check_expr`.
+    fn check_expr_expecting(&mut self, expr: &Expr, expected: Option<&TypeName>) -> TypeName {
+        if let Expr::NullLit(span) = expr {
+            return match expected {
+                Some(TypeName::Ptr(inner)) => TypeName::Ptr(inner.clone()),
+                Some(other) => {
+                    self.error("E0091", format!("`null` is not a valid `{other}`"), *span);
+                    TypeName::Int
+                }
+                None => {
+                    self.error(
+                        "E0091",
+                        "cannot infer the pointer type of `null` here -- annotate it, e.g. `p: ptr<int> = null`",
+                        *span,
+                    );
+                    TypeName::Int
+                }
+            };
+        }
+        self.check_expr(expr)
     }
 
     fn check_return(&mut self, value: Option<&Expr>, span: Span) {
@@ -552,6 +646,22 @@ impl<'a> Analyzer<'a> {
                     }
                 }
                 let base_ty = self.check_expr(base);
+                if matches!(
+                    base.as_ref(),
+                    Expr::Unary {
+                        op: UnOp::Deref,
+                        ..
+                    }
+                ) {
+                    self.error(
+                        "E0099",
+                        "reading a field through a dereferenced pointer isn't supported yet -- \
+                         write `s = *p` first, then use `s.field` (this copies the struct rather \
+                         than reading through `p`, see docs/pointers.md)",
+                        *span,
+                    );
+                    return TypeName::Int;
+                }
                 self.resolve_field(&base_ty, field, *span)
                     .unwrap_or(TypeName::Int)
             }
@@ -559,7 +669,55 @@ impl<'a> Analyzer<'a> {
             Expr::Binary { op, lhs, rhs, span } => self.check_binary(*op, lhs, rhs, *span),
             Expr::Call { name, args, span } => self.check_call(name, args, *span),
             Expr::Await { expr, .. } => self.check_expr(expr),
+            Expr::NullLit(span) => {
+                self.error(
+                    "E0091",
+                    "cannot infer the pointer type of `null` here -- annotate it, e.g. `p: ptr<int> = null`",
+                    *span,
+                );
+                TypeName::Int
+            }
+            Expr::Alloc { ty, span } => self.check_alloc(ty, *span),
+            Expr::AllocN { ty, count, span } => {
+                let count_ty = self.check_expr(count);
+                if count_ty != TypeName::Int {
+                    self.error(
+                        "E0093",
+                        format!("`alloc_n` expects an `int` count, found `{count_ty}`"),
+                        count.span(),
+                    );
+                }
+                self.check_alloc(ty, *span)
+            }
         }
+    }
+
+    /// Shared validation for `alloc(T)`/`alloc_n(T, ...)`: `T` must be a
+    /// scalar or a known struct -- `ptr<ptr<T>>` (allocating storage for
+    /// a pointer-to-a-pointer) and allocating a list/tuple/dict aren't
+    /// supported yet (see `docs/pointers.md`).
+    fn check_alloc(&mut self, ty: &TypeName, span: Span) -> TypeName {
+        match ty {
+            TypeName::Ptr(_) => {
+                self.error(
+                    "E0092",
+                    "`alloc`/`alloc_n` of a `ptr<...>` isn't supported yet -- pointers to pointers aren't implemented",
+                    span,
+                );
+            }
+            TypeName::List(_) | TypeName::Tuple(_) | TypeName::Dict(_) => {
+                self.error(
+                    "E0092",
+                    format!("`alloc`/`alloc_n` of `{ty}` isn't supported yet -- only scalar types and structs can be allocated"),
+                    span,
+                );
+            }
+            TypeName::Struct(name) if !self.tables.structs.contains_key(name) => {
+                self.error("E0058", format!("unknown type `{name}`"), span);
+            }
+            _ => {}
+        }
+        TypeName::Ptr(Box::new(ty.clone()))
     }
 
     fn check_list_literal(&mut self, items: &[Expr], span: Span) -> TypeName {
@@ -713,6 +871,42 @@ impl<'a> Analyzer<'a> {
     }
 
     fn check_unary(&mut self, op: UnOp, expr: &Expr, span: Span) -> TypeName {
+        if op == UnOp::AddrOf {
+            // `&x` -- only a plain local variable is addressable in
+            // v0.1.3 (not `&(x + 1)`, not yet `&struct_var` -- see
+            // `docs/pointers.md`). Checked before `check_expr(expr)`
+            // below so the "not addressable" error doesn't also drag in
+            // an unrelated one from evaluating a non-identifier
+            // sub-expression.
+            let Expr::Identifier(name, ident_span) = expr else {
+                self.error(
+                    "E0094",
+                    "`&` can only take the address of a local variable, e.g. `&x`",
+                    span,
+                );
+                return TypeName::Ptr(Box::new(TypeName::Int));
+            };
+            let ty = match self.lookup(name) {
+                Some(ty) => ty,
+                None => {
+                    self.error(
+                        "E0021",
+                        format!("cannot find variable `{name}` in this scope"),
+                        *ident_span,
+                    );
+                    TypeName::Int
+                }
+            };
+            if !is_scalar(&ty) {
+                self.error(
+                    "E0095",
+                    format!("cannot take the address of a `{ty}` yet -- only `int`/`float`/`bool`/`string` locals are addressable in v0.1.3"),
+                    span,
+                );
+            }
+            return TypeName::Ptr(Box::new(ty));
+        }
+
         let ty = self.check_expr(expr);
         match op {
             UnOp::Neg => {
@@ -735,18 +929,84 @@ impl<'a> Analyzer<'a> {
                 }
                 TypeName::Bool
             }
+            UnOp::Deref => match ty {
+                TypeName::Ptr(inner) => *inner,
+                other => {
+                    self.error(
+                        "E0089",
+                        format!("cannot dereference `{other}`: not a pointer"),
+                        span,
+                    );
+                    TypeName::Int
+                }
+            },
+            UnOp::AddrOf => unreachable!("handled above"),
         }
     }
 
     fn check_binary(&mut self, op: BinOp, lhs: &Expr, rhs: &Expr, span: Span) -> TypeName {
+        use BinOp::*;
+
+        // `null` needs to borrow its type from the *other* operand (see
+        // `check_expr_expecting`) -- so for `==`/`!=` specifically,
+        // check one side first and feed its type in as a hint for the
+        // other, instead of checking both sides context-free like every
+        // other operator does.
+        if matches!(op, Eq | NotEq) {
+            let (lty, rty) = match (lhs, rhs) {
+                (Expr::NullLit(_), _) => {
+                    let rty = self.check_expr(rhs);
+                    let lty = self.check_expr_expecting(lhs, Some(&rty));
+                    (lty, rty)
+                }
+                _ => {
+                    let lty = self.check_expr(lhs);
+                    let rty = self.check_expr_expecting(rhs, Some(&lty));
+                    (lty, rty)
+                }
+            };
+            if lty != rty {
+                self.error(
+                    "E0028",
+                    format!(
+                        "cannot compare `{lty}` and `{rty}` with `{}`",
+                        op_symbol(op)
+                    ),
+                    span,
+                );
+            }
+            return TypeName::Bool;
+        }
+
         let lty = self.check_expr(lhs);
         let rty = self.check_expr(rhs);
-        use BinOp::*;
         match op {
-            Add | Sub | Mul | Div | Mod => {
+            Add | Sub => {
                 if op == Add && lty == TypeName::String && rty == TypeName::String {
                     return TypeName::String;
                 }
+                // Pointer arithmetic: `p + n`/`p - n` moves `p` by `n`
+                // elements (not bytes -- codegen scales by `sizeof(T)`).
+                // `n + p` is accepted too (matches C); `n - p` is not,
+                // same as C, since "int minus an address" isn't a
+                // pointer.
+                match (&lty, &rty) {
+                    (TypeName::Ptr(_), TypeName::Int) => return lty,
+                    (TypeName::Int, TypeName::Ptr(_)) if op == Add => return rty,
+                    _ => {}
+                }
+                if lty != rty || (lty != TypeName::Int && lty != TypeName::Float) {
+                    self.error(
+                        "E0027",
+                        format!("cannot apply arithmetic operator to `{lty}` and `{rty}`"),
+                        span,
+                    );
+                    TypeName::Int
+                } else {
+                    lty
+                }
+            }
+            Mul | Div | Mod => {
                 if lty != rty || (lty != TypeName::Int && lty != TypeName::Float) {
                     self.error(
                         "E0027",
@@ -774,19 +1034,7 @@ impl<'a> Analyzer<'a> {
                 }
                 TypeName::Bool
             }
-            Eq | NotEq => {
-                if lty != rty {
-                    self.error(
-                        "E0028",
-                        format!(
-                            "cannot compare `{lty}` and `{rty}` with `{}`",
-                            op_symbol(op)
-                        ),
-                        span,
-                    );
-                }
-                TypeName::Bool
-            }
+            Eq | NotEq => unreachable!("handled above"),
             And | Or => {
                 if lty != TypeName::Bool || rty != TypeName::Bool {
                     self.error(
@@ -1043,6 +1291,30 @@ impl<'a> Analyzer<'a> {
             return TypeName::String;
         }
 
+        if name == "free" {
+            if args.len() != 1 {
+                self.error(
+                    "E0096",
+                    format!(
+                        "`free` takes exactly 1 argument (a pointer), found {}",
+                        args.len()
+                    ),
+                    span,
+                );
+            }
+            if let Some(a) = args.first() {
+                let ty = self.check_expr(a);
+                if !matches!(ty, TypeName::Ptr(_)) {
+                    self.error(
+                        "E0097",
+                        format!("`free` expects a `ptr<T>`, found `{ty}`"),
+                        a.span(),
+                    );
+                }
+            }
+            return TypeName::Void;
+        }
+
         // Struct construction: `User()`.
         if self.tables.structs.contains_key(name) {
             if !args.is_empty() {
@@ -1126,7 +1398,12 @@ impl<'a> Analyzer<'a> {
 fn is_scalar(ty: &TypeName) -> bool {
     matches!(
         ty,
-        TypeName::Int | TypeName::Float | TypeName::Bool | TypeName::String | TypeName::Enum(_)
+        TypeName::Int
+            | TypeName::Float
+            | TypeName::Bool
+            | TypeName::String
+            | TypeName::Enum(_)
+            | TypeName::Ptr(_)
     )
 }
 
@@ -1134,8 +1411,8 @@ fn is_scalar(ty: &TypeName) -> bool {
 /// creates them -- they can never be passed as an argument or returned
 /// (this is what lets IR lowering assume an aggregate is always addressed
 /// by a plain local name; see `ir.rs` module docs). Passing them across a
-/// function boundary is a v0.2 roadmap item once a real calling
-/// convention for aggregates is designed.
+/// function boundary isn't supported yet -- doing that needs a real
+/// calling convention for aggregates, not designed yet.
 fn is_first_class_value(ty: &TypeName) -> bool {
     is_scalar(ty) || matches!(ty, TypeName::Void)
 }

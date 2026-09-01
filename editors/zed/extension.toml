@@ -1,6 +1,6 @@
 id = "kite"
 name = "Kite"
-version = "0.1.2"
+version = "0.1.3"
 schema_version = 1
 authors = ["yo-le-zz"]
 description = "Syntax highlighting and language configuration for the Kite programming language"
@@ -15,7 +15,6 @@ repository = "https://github.com/yo-le-zz/tree-sitter-kite"
 rev = "REPLACE_WITH_TREE_SITTER_KITE_COMMIT_SHA"
 
 [language_servers]
-# No language server yet -- see docs/roadmap.md ("no LSP" under
-# "Smaller, nearer-term items" in the main kite repository). This
+# No language server yet. This
 # section is left here, empty, as the place a future `kite-lsp` entry
 # would go.

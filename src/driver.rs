@@ -13,7 +13,33 @@ use crate::resolve;
 use crate::sema;
 use anyhow::{bail, Context, Result};
 use std::path::Path;
+use std::path::PathBuf;
 use std::process::Command;
+
+/// Whether the resolved build target is Windows: either an explicit
+/// `--target`/`kite.toml` triple naming it (cross-compiling), or --
+/// when no triple was given at all, so `clang` defaults to the host --
+/// the host we're actually running on.
+fn is_windows_target(target: Option<&str>) -> bool {
+    match target {
+        Some(triple) => triple.contains("windows"),
+        None => cfg!(windows),
+    }
+}
+
+/// Appends `.exe` to `path` when building for Windows and `path` has no
+/// extension of its own -- an explicit `-o out.bin` is always left
+/// alone, matching how `--freestanding`/`--lib` only fill in `.o` when
+/// nothing was specified (see `src/commands/build.rs`). See the doc
+/// comment on `compile_llvm_ir_to_executable`'s call to this for why
+/// this needs to live here rather than only in the CLI layer.
+fn normalized_executable_path(path: &Path, target_triple: Option<&str>) -> PathBuf {
+    if is_windows_target(target_triple) && path.extension().is_none() {
+        path.with_extension("exe")
+    } else {
+        path.to_path_buf()
+    }
+}
 
 /// Outcome of running the front end (everything up to and including
 /// semantic analysis) over a source file.
@@ -123,8 +149,10 @@ fn report_and_check(filename: &str, source: &str, diags: &DiagnosticBag) -> bool
 }
 
 /// Compiles a single in-memory Kite source (no real file backing it, no
-/// import resolution) all the way down to a native executable at
-/// `output_path`. Used directly by the test suite; for a real on-disk
+/// import resolution) all the way down to a native executable, at
+/// `output_path` (or `output_path` with `.exe` appended, on Windows --
+/// see `normalized_executable_path`; the actual final path is what's
+/// returned). Used directly by the test suite; for a real on-disk
 /// project, use [`build_project`].
 pub fn build_executable(
     filename: &str,
@@ -132,7 +160,7 @@ pub fn build_executable(
     output_path: &Path,
     opt_level: u8,
     target_triple: Option<&str>,
-) -> Result<()> {
+) -> Result<std::path::PathBuf> {
     let (outcome, ir_program) = check_source(filename, source);
     if matches!(outcome, CheckOutcome::Errors) {
         bail!("aborting build due to previous error(s)");
@@ -151,7 +179,9 @@ pub fn build_executable(
 }
 
 /// Compiles a real, on-disk (possibly multi-file) project all the way
-/// down to a native executable at `output_path`. `static_link` passes
+/// down to a native executable, at `output_path` (or `output_path` with
+/// `.exe` appended, on Windows -- see `normalized_executable_path`; the
+/// actual final path is what's returned). `static_link` passes
 /// `-static` to clang so the result has no dynamic library dependencies
 /// at runtime -- see `kite build --static`. `extra_link_inputs` are
 /// additional object files/static libraries/C source files passed to
@@ -166,7 +196,7 @@ pub fn build_project(
     target_triple: Option<&str>,
     static_link: bool,
     extra_link_inputs: &[std::path::PathBuf],
-) -> Result<()> {
+) -> Result<std::path::PathBuf> {
     let (outcome, ir_program) = check_project(entry_path, src_root);
     if matches!(outcome, CheckOutcome::Errors) {
         bail!("aborting build due to previous error(s)");
@@ -214,7 +244,8 @@ pub fn build_project_freestanding(
         opt_level,
         target_triple,
         BuildKind::Object { bare_metal: true },
-    )
+    )?;
+    Ok(())
 }
 
 /// Compiles a real, on-disk (possibly multi-file) project down to a
@@ -276,7 +307,7 @@ fn build_from_ir(
     opt_level: u8,
     target_triple: Option<&str>,
     kind: BuildKind,
-) -> Result<()> {
+) -> Result<std::path::PathBuf> {
     let no_hosted_main = matches!(kind, BuildKind::Object { .. });
     let llvm_ir = codegen::emit_module(
         ir_program,
@@ -299,7 +330,8 @@ fn build_from_ir(
             &extra_link_inputs,
         ),
         BuildKind::Object { bare_metal } => {
-            compile_llvm_ir_to_object(&llvm_ir, output_path, opt_level, target_triple, bare_metal)
+            compile_llvm_ir_to_object(&llvm_ir, output_path, opt_level, target_triple, bare_metal)?;
+            Ok(output_path.to_path_buf())
         }
     }
 }
@@ -314,7 +346,24 @@ fn compile_llvm_ir_to_executable(
     target_triple: Option<&str>,
     static_link: bool,
     extra_link_inputs: &[std::path::PathBuf],
-) -> Result<()> {
+) -> Result<std::path::PathBuf> {
+    // Windows executables need a `.exe` extension. This isn't just
+    // cosmetic: Rust's own `std::process::Command` on Windows will
+    // *silently* look for `{path}.exe` when `path` has no extension at
+    // all (see `std::process::Command`'s platform-specific docs, and
+    // https://github.com/rust-lang/rust/issues/37519) -- which is
+    // harmless if `clang`/`lld-link` also happened to add `.exe`
+    // implicitly, but not something to depend on across toolchains.
+    // Applying this here (rather than only in the CLI's `kite build`
+    // command) covers every caller uniformly: `kite build`/`run`, the
+    // test suite's `build_executable` (`tests/llvm_backend_tests.rs`
+    // alone drives ~30 tests through this), and any future one. The
+    // normalized path is *returned* rather than just used locally, so
+    // every caller ends up acting on the real on-disk name instead of
+    // possibly printing/running a different (extensionless) one.
+    let output_path = normalized_executable_path(output_path, target_triple);
+    let output_path = output_path.as_path();
+
     if let Some(parent) = output_path.parent() {
         std::fs::create_dir_all(parent)
             .with_context(|| format!("failed to create output directory {}", parent.display()))?;
@@ -357,7 +406,7 @@ fn compile_llvm_ir_to_executable(
         );
     }
 
-    Ok(())
+    Ok(output_path.to_path_buf())
 }
 
 /// Shells out to `clang -c` to turn textual LLVM IR into a relocatable
@@ -412,4 +461,57 @@ fn compile_llvm_ir_to_object(
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod windows_extension_tests {
+    use super::{is_windows_target, normalized_executable_path};
+    use std::path::Path;
+
+    #[test]
+    fn explicit_windows_triples_are_detected() {
+        assert!(is_windows_target(Some("x86_64-pc-windows-msvc")));
+        assert!(is_windows_target(Some("x86_64-pc-windows-gnu")));
+        assert!(is_windows_target(Some("aarch64-pc-windows-msvc")));
+    }
+
+    #[test]
+    fn explicit_non_windows_triples_are_not_detected() {
+        assert!(!is_windows_target(Some("x86_64-unknown-linux-gnu")));
+        assert!(!is_windows_target(Some("aarch64-apple-darwin")));
+        assert!(!is_windows_target(Some("wasm32-unknown-unknown")));
+    }
+
+    #[test]
+    fn no_target_falls_back_to_the_host() {
+        // Whichever OS actually runs this test -- `is_windows_target`
+        // should agree with `cfg!(windows)` when no triple was given,
+        // since that's exactly what `clang` itself defaults to.
+        assert_eq!(is_windows_target(None), cfg!(windows));
+    }
+
+    #[test]
+    fn windows_target_gets_exe_appended_when_no_extension_given() {
+        let normalized =
+            normalized_executable_path(Path::new("/tmp/program"), Some("x86_64-pc-windows-gnu"));
+        assert_eq!(normalized, Path::new("/tmp/program.exe"));
+    }
+
+    #[test]
+    fn windows_target_leaves_an_explicit_extension_alone() {
+        // An explicit `-o out.bin` is a deliberate choice; normalizing
+        // it to `out.bin.exe` would be surprising, not helpful.
+        let normalized = normalized_executable_path(
+            Path::new("/tmp/program.bin"),
+            Some("x86_64-pc-windows-gnu"),
+        );
+        assert_eq!(normalized, Path::new("/tmp/program.bin"));
+    }
+
+    #[test]
+    fn non_windows_target_is_never_touched() {
+        let normalized =
+            normalized_executable_path(Path::new("/tmp/program"), Some("x86_64-unknown-linux-gnu"));
+        assert_eq!(normalized, Path::new("/tmp/program"));
+    }
 }

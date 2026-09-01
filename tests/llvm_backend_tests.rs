@@ -24,8 +24,17 @@ fn run_kite_program(source: &str) -> Option<String> {
     }
     let dir = tempdir().expect("tempdir");
     let output_path = dir.path().join("program");
-    build_executable("test.ki", source, &output_path, 0, None).expect("build_executable failed");
-    let output = Command::new(&output_path)
+    // Use the *returned* path, not `output_path` -- on Windows this is
+    // `program.exe`, not `program` (see
+    // `driver::normalized_executable_path`). Rust's `Command::new` does
+    // transparently retry with `.exe` appended on Windows even given
+    // the extensionless name, but relying on that silently is exactly
+    // the kind of thing that turned into a real, confusing CI failure
+    // once already -- using the authoritative path is one line and
+    // removes the question entirely.
+    let built_path = build_executable("test.ki", source, &output_path, 0, None)
+        .expect("build_executable failed");
+    let output = Command::new(built_path)
         .output()
         .expect("failed to run compiled program");
     assert!(
@@ -45,8 +54,9 @@ fn run_kite_program_with_args(source: &str, args: &[&str]) -> Option<String> {
     }
     let dir = tempdir().expect("tempdir");
     let output_path = dir.path().join("program");
-    build_executable("test.ki", source, &output_path, 0, None).expect("build_executable failed");
-    let output = Command::new(&output_path)
+    let built_path = build_executable("test.ki", source, &output_path, 0, None)
+        .expect("build_executable failed");
+    let output = Command::new(built_path)
         .args(args)
         .output()
         .expect("failed to run compiled program");
@@ -100,7 +110,7 @@ fn out_of_bounds_index_aborts_safely_instead_of_crashing() {
     }
     let dir = tempdir().expect("tempdir");
     let output_path = dir.path().join("program");
-    build_executable(
+    let built_path = build_executable(
         "test.ki",
         "make main():\n    xs = [1, 2, 3]\n    print(xs[10])\n",
         &output_path,
@@ -108,7 +118,7 @@ fn out_of_bounds_index_aborts_safely_instead_of_crashing() {
         None,
     )
     .expect("build_executable failed");
-    let output = Command::new(&output_path)
+    let output = Command::new(built_path)
         .output()
         .expect("failed to run compiled program");
     assert!(
@@ -240,10 +250,11 @@ fn kite_can_call_c_via_extern_and_link() {
     .unwrap();
 
     let output_path = dir.path().join("prog");
-    kite::driver::build_project(&src, dir.path(), &output_path, 0, None, false, &[c_path])
-        .expect("build with --link should succeed");
+    let built_path =
+        kite::driver::build_project(&src, dir.path(), &output_path, 0, None, false, &[c_path])
+            .expect("build with --link should succeed");
 
-    let output = Command::new(&output_path)
+    let output = Command::new(built_path)
         .output()
         .expect("run compiled program");
     assert!(output.status.success());
@@ -362,8 +373,9 @@ fn write_file_then_read_file_round_trips() {
         path = path_str.replace('\\', "\\\\")
     );
     let output_path = dir.path().join("program");
-    build_executable("test.ki", &source, &output_path, 0, None).expect("build_executable failed");
-    let output = Command::new(&output_path)
+    let built_path = build_executable("test.ki", &source, &output_path, 0, None)
+        .expect("build_executable failed");
+    let output = Command::new(built_path)
         .output()
         .expect("failed to run compiled program");
     assert!(
@@ -400,4 +412,81 @@ fn arg_count_is_zero_with_no_arguments() {
         return;
     };
     assert_eq!(stdout, "0\n");
+}
+
+#[test]
+fn pointer_alloc_deref_and_free_round_trip() {
+    let source =
+        "make main():\n    p: ptr<int> = alloc(int)\n    *p = 42\n    print(*p)\n    free(p)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn null_pointer_comparison() {
+    let source = "make main():\n    p: ptr<int> = null\n    print(p == null)\n    print(p != null)\n    p = alloc(int)\n    print(p == null)\n    free(p)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "true\nfalse\nfalse\n");
+}
+
+#[test]
+fn two_pointers_to_the_same_allocation_compare_equal() {
+    let source = "make main():\n    p: ptr<int> = alloc(int)\n    q = p\n    print(p == q)\n    *p = 5\n    print(*q)\n    free(p)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "true\n5\n");
+}
+
+#[test]
+fn alloc_zero_initializes_memory() {
+    let source = "make main():\n    p: ptr<int> = alloc(int)\n    print(*p)\n    free(p)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "0\n");
+}
+
+#[test]
+fn alloc_n_and_pointer_arithmetic_build_an_array() {
+    let source = "make main():\n    r: ptr<int> = alloc_n(int, 5)\n    i = 0\n    until i >= 5:\n        *(r + i) = i * 10\n        i = i + 1\n    i = 0\n    until i >= 5:\n        print(*(r + i))\n        i = i + 1\n    free(r)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "0\n10\n20\n30\n40\n");
+}
+
+#[test]
+fn address_of_a_local_reads_and_writes_through_to_it() {
+    let source = "make main():\n    x = 7\n    p = &x\n    print(*p)\n    *p = 99\n    print(x)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "7\n99\n");
+}
+
+#[test]
+fn pointers_to_structs_can_be_allocated_compared_and_freed() {
+    // Field access *through* a struct pointer (`(*p).x = ...`) isn't
+    // supported yet -- see the E0099 diagnostic in `sema.rs` and
+    // `docs/pointers.md` -- but allocating, passing around, comparing,
+    // and freeing a `ptr<Struct>` all work today.
+    let source = "type Point:\n    x: int\n    y: int\n\nmake main():\n    p: ptr<Point> = alloc(Point)\n    q = p\n    print(p == q)\n    s = *p\n    s.x = 3\n    s.y = 4\n    print(s.x + s.y)\n    free(p)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "true\n7\n");
+}
+
+#[test]
+fn pointers_can_be_function_parameters_and_return_values() {
+    let source = "make set_to(p: ptr<int>, v: int):\n    *p = v\n\nmake make_ptr() -> ptr<int>:\n    p: ptr<int> = alloc(int)\n    return p\n\nmake main():\n    p = make_ptr()\n    set_to(p, 123)\n    print(*p)\n    free(p)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "123\n");
 }

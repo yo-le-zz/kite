@@ -62,7 +62,10 @@ pub fn emit_module(program: &IrProgram, options: &CodegenOptions) -> String {
     out.push_str("declare i64 @fwrite(i8*, i64, i64, i8*)\n");
     out.push_str("declare i32 @fclose(i8*)\n");
     out.push_str("declare i32 @fseek(i8*, i64, i32)\n");
-    out.push_str("declare i64 @ftell(i8*)\n\n");
+    out.push_str("declare i64 @ftell(i8*)\n");
+    // `alloc`/`alloc_n` support -- zero-initializing freshly allocated
+    // memory (see `docs/pointers.md`, "alloc always zero-initializes").
+    out.push_str("declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)\n\n");
     // Stashed by `main` at startup (hosted builds only -- see
     // `emit_function`'s `is_main` case) so `arg`/`arg_count` can read
     // them from any function, not just `main` itself. Zero-initialized,
@@ -307,6 +310,7 @@ fn llvm_type(ty: &IrType) -> String {
             elems.iter().map(llvm_type).collect::<Vec<_>>().join(", ")
         ),
         IrType::StructRef(name) => format!("%{name}"),
+        IrType::Ptr(inner) => format!("{}*", llvm_type(inner)),
     }
 }
 
@@ -582,6 +586,114 @@ fn emit_instr(instr: &IrInstr, fctx: &mut FnCtx, is_main: bool, out: &mut String
                 "  {elem_ptr} = getelementptr inbounds i8*, i8** {argv}, i64 {idx_val}"
             );
             let _ = writeln!(out, "  %t{dest} = load i8*, i8** {elem_ptr}");
+        }
+        IrInstr::Alloc { dest, pointee_ty } => {
+            let lty = llvm_type(pointee_ty);
+            let size = emit_sizeof(&lty, out);
+            let raw = fresh_ptr_name();
+            let _ = writeln!(out, "  {raw} = call i8* @malloc(i64 {size})");
+            let _ = writeln!(
+                out,
+                "  call void @llvm.memset.p0i8.i64(i8* {raw}, i8 0, i64 {size}, i1 false)"
+            );
+            let _ = writeln!(out, "  %t{dest} = bitcast i8* {raw} to {lty}*");
+        }
+        IrInstr::AllocN {
+            dest,
+            pointee_ty,
+            count,
+        } => {
+            let lty = llvm_type(pointee_ty);
+            let elem_size = emit_sizeof(&lty, out);
+            let (count_val, _) = emit_value(count, fctx, &IrType::I64, out);
+            let total_size = fresh_reg_name();
+            let _ = writeln!(out, "  {total_size} = mul i64 {elem_size}, {count_val}");
+            let raw = fresh_ptr_name();
+            let _ = writeln!(out, "  {raw} = call i8* @malloc(i64 {total_size})");
+            let _ = writeln!(
+                out,
+                "  call void @llvm.memset.p0i8.i64(i8* {raw}, i8 0, i64 {total_size}, i1 false)"
+            );
+            let _ = writeln!(out, "  %t{dest} = bitcast i8* {raw} to {lty}*");
+        }
+        IrInstr::Free { ptr, pointee_ty } => {
+            let lty = llvm_type(pointee_ty);
+            let ptr_ty = IrType::Ptr(Box::new(pointee_ty.clone()));
+            let (p, _) = emit_value(ptr, fctx, &ptr_ty, out);
+            let as_i8 = fresh_ptr_name();
+            let _ = writeln!(out, "  {as_i8} = bitcast {lty}* {p} to i8*");
+            let _ = writeln!(out, "  call void @free(i8* {as_i8})");
+        }
+        IrInstr::PtrLoad {
+            dest,
+            ptr,
+            pointee_ty,
+        } => {
+            let lty = llvm_type(pointee_ty);
+            let ptr_ty = IrType::Ptr(Box::new(pointee_ty.clone()));
+            let (p, _) = emit_value(ptr, fctx, &ptr_ty, out);
+            let _ = writeln!(out, "  %t{dest} = load {lty}, {lty}* {p}");
+        }
+        IrInstr::PtrStore {
+            ptr,
+            value,
+            pointee_ty,
+        } => {
+            let lty = llvm_type(pointee_ty);
+            let ptr_ty = IrType::Ptr(Box::new(pointee_ty.clone()));
+            let (p, _) = emit_value(ptr, fctx, &ptr_ty, out);
+            let (v, _) = emit_value(value, fctx, pointee_ty, out);
+            let _ = writeln!(out, "  store {lty} {v}, {lty}* {p}");
+        }
+        IrInstr::AddrOf { dest, name } => {
+            let local_ty = fctx
+                .locals
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| panic!("`&{name}`: unknown local (compiler bug)"));
+            let lty = llvm_type(&local_ty);
+            // `%name` is already the address (every local scalar is
+            // `alloca`'d, i.e. addressable, for its whole lifetime) --
+            // this is a no-op bitcast that just gives `&x` its own SSA
+            // name to be used from here on.
+            let _ = writeln!(out, "  %t{dest} = bitcast {lty}* %{name} to {lty}*");
+        }
+        IrInstr::PtrOffset {
+            dest,
+            ptr,
+            offset,
+            pointee_ty,
+            negate,
+        } => {
+            let lty = llvm_type(pointee_ty);
+            let ptr_ty = IrType::Ptr(Box::new(pointee_ty.clone()));
+            let (p, _) = emit_value(ptr, fctx, &ptr_ty, out);
+            let (off, _) = emit_value(offset, fctx, &IrType::I64, out);
+            let off = if *negate {
+                let negated = fresh_reg_name();
+                let _ = writeln!(out, "  {negated} = sub i64 0, {off}");
+                negated
+            } else {
+                off
+            };
+            let _ = writeln!(
+                out,
+                "  %t{dest} = getelementptr {lty}, {lty}* {p}, i64 {off}"
+            );
+        }
+        IrInstr::PtrEq {
+            dest,
+            lhs,
+            rhs,
+            pointee_ty,
+            negate,
+        } => {
+            let ptr_ty = IrType::Ptr(Box::new(pointee_ty.clone()));
+            let lty = llvm_type(&ptr_ty);
+            let (l, _) = emit_value(lhs, fctx, &ptr_ty, out);
+            let (r, _) = emit_value(rhs, fctx, &ptr_ty, out);
+            let mnemonic = if *negate { "ne" } else { "eq" };
+            let _ = writeln!(out, "  %t{dest} = icmp {mnemonic} {lty} {l}, {r}");
         }
         IrInstr::BinOp { dest, op, lhs, rhs } => emit_binop(*dest, *op, lhs, rhs, fctx, out),
         IrInstr::Neg { dest, value, ty } => {
@@ -942,6 +1054,7 @@ fn emit_value(
             (if *v { "true" } else { "false" }).to_string(),
             IrType::Bool,
         ),
+        IrValue::ConstNull(pointee_ty) => ("null".to_string(), IrType::Ptr(pointee_ty.clone())),
         IrValue::ConstStr(s) => {
             let name = fctx
                 .ctx
@@ -1144,6 +1257,23 @@ fn sanitize_label(label: &str) -> String {
 use std::cell::Cell;
 thread_local! {
     static REG_COUNTER: Cell<u32> = const { Cell::new(0) };
+}
+
+/// `sizeof(T)` in bytes, for `alloc`/`alloc_n` -- the standard
+/// target-independent LLVM trick: index one past a null pointer of the
+/// type and see what address that lands on.
+fn emit_sizeof(llvm_pointee_ty: &str, out: &mut String) -> String {
+    let size_ptr = fresh_ptr_name();
+    let size = fresh_reg_name();
+    let _ = writeln!(
+        out,
+        "  {size_ptr} = getelementptr {llvm_pointee_ty}, {llvm_pointee_ty}* null, i32 1"
+    );
+    let _ = writeln!(
+        out,
+        "  {size} = ptrtoint {llvm_pointee_ty}* {size_ptr} to i64"
+    );
+    size
 }
 
 fn fresh_reg_name() -> String {

@@ -24,7 +24,7 @@ compiler itself.
 
 ## What "you don't manage it" actually means today
 
-Kite v0.1.2 does **not** have a garbage collector. What it has instead
+Kite v0.1.3 does **not** have a garbage collector. What it has instead
 is simpler and worth understanding honestly:
 
 - Numbers (`int`, `float`), `bool`, and struct instances live on the
@@ -50,7 +50,7 @@ program (a server, a daemon) that keeps allocating in a loop forever:
 that will keep growing its memory usage without bound. If you're
 writing something like that today, that's the one thing to be aware
 of. A real garbage collector (or some other reclamation strategy) is
-future work, not something v0.1.2 has yet.
+future work, not something v0.1.3 has yet.
 
 ## Why this is a reasonable place to start
 
@@ -65,6 +65,12 @@ forever. Kite chose to ship that honestly rather than pretend a real
 GC already exists.
 
 ## The low-level view, for advanced use
+
+Everything above describes memory Kite manages *for* you (strings,
+lists, structs). For memory you manage yourself -- real addresses,
+`alloc`/`free`, pointer arithmetic -- see
+[`docs/pointers.md`](pointers.md); this section is about how Kite's
+own automatic allocations work under the hood, not about that layer.
 
 If you want to see exactly what a piece of Kite code turns into: `kite
 build` always writes the generated LLVM IR to a `.ll` file next to
@@ -95,7 +101,7 @@ A few concrete facts, if you'd rather not read IR:
 - **Every heap allocation goes through plain `malloc`/`free`** (`i8*
   @malloc(i64)` / `void @free(i8*)`, declared at the top of every
   generated `.ll` file) -- there's no custom allocator, arena, or
-  bump-allocator underneath it in v0.1.2.
+  bump-allocator underneath it in v0.1.3.
 - **`--freestanding` builds** (see `docs/architecture.md`) still emit
   the same `malloc`/`free` calls for strings/lists -- they're your
   responsibility to provide symbols for, exactly like every other

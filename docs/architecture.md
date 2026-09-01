@@ -136,7 +136,7 @@ This is what lets IR lowering assume an aggregate value is *always*
 addressed by a plain local variable name, never flowing through a
 temporary SSA register the way a scalar does (see `ir.rs`'s module docs).
 It is a deliberate scope cut for v0.1, not an oversight -- see
-`docs/roadmap.md` for the general aggregate-passing design planned for
+above for the general aggregate-passing design planned for
 v0.2.
 
 ## IR (`src/ir.rs`)
@@ -163,7 +163,7 @@ Key design points:
   `append`ing through one alias doesn't update the other's *length*
   unless that append also happened to trigger a fresh allocation both
   would see. A single shared header (via one more level of indirection)
-  is the natural v0.2 fix -- see the roadmap.
+  is the natural fix, once aggregate values can cross function boundaries.
 - **`try`/`finally` via replay, not unwinding.** There's no runtime
   exception mechanism in v0.1, so the only way to leave a `try` block
   early is `return`/`break`/`continue`. `FunctionLowerer::finally_stack`

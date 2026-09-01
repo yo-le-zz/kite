@@ -310,3 +310,38 @@ fn arg_rejects_a_non_int_index() {
         .iter()
         .any(|e| e.contains("`arg` expects an `int` index")));
 }
+
+#[test]
+fn field_assignment_through_a_deref_is_rejected_with_a_clear_error() {
+    let errors = check_err("type Point:\n    x: int\n\nmake main():\n    p: ptr<Point> = alloc(Point)\n    (*p).x = 3\n");
+    assert!(errors
+        .iter()
+        .any(|e| e.contains("assigning a field through a dereferenced pointer")));
+}
+
+#[test]
+fn field_read_through_a_deref_is_rejected_with_a_clear_error() {
+    let errors = check_err("type Point:\n    x: int\n\nmake main():\n    p: ptr<Point> = alloc(Point)\n    print((*p).x)\n");
+    assert!(errors
+        .iter()
+        .any(|e| e.contains("reading a field through a dereferenced pointer")));
+}
+
+#[test]
+fn pointer_arithmetic_type_checks() {
+    check_ok("make main():\n    p: ptr<int> = alloc_n(int, 10)\n    q = p + 5\n    print(*q)\n    free(p)\n");
+}
+
+#[test]
+fn dereferencing_a_non_pointer_is_a_type_error() {
+    let errors = check_err("make main():\n    x = 5\n    print(*x)\n");
+    assert!(errors.iter().any(|e| e.contains("cannot dereference")));
+}
+
+#[test]
+fn address_of_a_non_identifier_is_rejected() {
+    let errors = check_err("make main():\n    p = &(1 + 2)\n");
+    assert!(errors
+        .iter()
+        .any(|e| e.contains("can only take the address of a local variable")));
+}

@@ -396,6 +396,7 @@ impl Lexer {
             '*' => Star,
             '/' => Slash,
             '%' => Percent,
+            '&' => Amp,
             '-' => {
                 if self.peek() == Some('>') {
                     self.advance();

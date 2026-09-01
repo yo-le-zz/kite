@@ -22,10 +22,10 @@ Kite is:
 
 This repository is the reference compiler: `kite`, written in Rust.
 
-> **Status:** v0.1.2. This is a real, working compiler with a full
+> **Status:** v0.1.3. This is a real, working compiler with a full
 > pipeline (lexer -> parser -> semantic analysis -> IR -> LLVM codegen ->
 > native executable) -- not a toy or a mockup. It also has real, documented
-> limitations; see [`docs/roadmap.md`](docs/roadmap.md) for what's next.
+> limitations, listed throughout this document as they come up.
 
 ---
 
@@ -103,7 +103,7 @@ If you know Cargo, most of this is familiar:
 | `cargo run` | `kite run` |
 | `cargo build --release` | `kite build --release` |
 | `cargo check` | `kite check` |
-| `cargo test` | -- (no built-in test framework yet; see `docs/roadmap.md`) |
+| `cargo test` | -- (no built-in test framework yet) |
 | `Cargo.toml` / `Cargo.lock` | `kite.toml` / `kite.lock` |
 | `cargo add`/`remove`/`update` | `kite add`/`remove`/`update` |
 
@@ -143,7 +143,7 @@ not untyped.
 
 These are fixed sizes, not architecture-dependent -- `int` is 64-bit
 regardless of host platform. There is currently no separate `int32`,
-`int8`, etc.; narrower integer types are a roadmap item.
+`int8`, etc.; narrower integer types aren't implemented yet.
 
 ### Functions
 
@@ -239,7 +239,7 @@ if c == Color.Red:
 
 Enum values are a plain `int` tag under the hood (declaration order,
 starting at 0) -- `print(c)` shows that number in v0.1, not the variant's
-name; string variant names at runtime are a roadmap item.
+name; string variant names at runtime aren't implemented yet.
 
 ### Modules -- multi-file and multi-directory projects
 
@@ -270,7 +270,7 @@ root -- not to whichever file the `use` appears in. `use module` and
 `from module import name` currently behave the same way: every function
 and struct in the imported file becomes available in the importing file
 (there's no per-symbol export list, and no `module.function()`
-qualification, yet -- see `docs/roadmap.md`).
+qualification, yet.
 
 ### Calling C from Kite, and Kite from C
 
@@ -304,7 +304,7 @@ from shapes.circle import area
 See "Modules" above -- `use`/`from ... import` resolve against real
 files under your project's `src/`. There is no standard library to
 import yet (`stdlib/` in this repo is a design scaffold, not something
-`kite build` links against -- see [`docs/roadmap.md`](docs/roadmap.md)),
+`kite build` links against),
 so `use math` errors unless you have your own `src/math.ki`.
 
 ### Error handling
@@ -321,8 +321,7 @@ finally:
 
 `finally` is guaranteed to run, even if `try` exits early via `return`,
 `break`, or `continue`. There is no runtime error/exception type in v0.1
-yet, so `failed` is type-checked but not currently reachable -- see the
-roadmap.
+yet, so `failed` is type-checked but not currently reachable.
 
 ### Concurrency (scaffolding)
 
@@ -338,8 +337,7 @@ make main():
 
 `thread` and `async`/`await` parse and type-check today; v0.1 runs both
 **synchronously** (no real OS threads or async runtime yet). This is
-explicit, documented scaffolding, not a hidden limitation -- see the
-roadmap for what real concurrency support will look like.
+explicit, documented scaffolding, not a hidden limitation.
 
 ## Package manager
 
@@ -352,16 +350,16 @@ kite update
 These manage `kite.toml`'s `[dependencies]` table and a `kite.lock`
 snapshot. There is no package registry to resolve against yet in v0.1 --
 `kite build` does not fetch or compile dependency sources. See
-[`docs/roadmap.md`](docs/roadmap.md).
+future work.
 
 ## Documentation
 
 - [`docs/architecture.md`](docs/architecture.md) -- how the compiler is built, stage by stage.
 - [`docs/builtins.md`](docs/builtins.md) -- every built-in function (`print`, `read_file`, string `+`, ...), with examples.
+- [`docs/pointers.md`](docs/pointers.md) -- `ptr<T>`, `alloc`/`free`, `&`/`*`, and what's/isn't safe.
 - [`docs/memory.md`](docs/memory.md) -- how memory works: nothing to manage for everyday code, full detail for advanced use.
 - [`docs/style.md`](docs/style.md) -- tabs vs. spaces, and other style notes.
 - [`docs/c-interop.md`](docs/c-interop.md) -- calling C from Kite, and Kite from C.
-- [`docs/roadmap.md`](docs/roadmap.md) -- what's implemented today, and what's next.
 - [`editors/zed/`](editors/zed/) -- syntax highlighting for Zed (grammar: [`tree-sitter-kite/`](tree-sitter-kite/)); see [`docs/zed-extension-publishing.md`](docs/zed-extension-publishing.md) to publish it.
 
 ## Development

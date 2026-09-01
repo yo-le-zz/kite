@@ -10,7 +10,7 @@ use crate::diagnostics::Span;
 ///
 /// v0.1 keeps collection element/field types restricted to the scalar
 /// types (`int`/`float`/`bool`/`string`) -- nested collections and
-/// collections-of-structs are a v0.2 roadmap item (see `docs/roadmap.md`)
+/// collections-of-structs are not yet supported
 /// since they require a more general LLVM aggregate-layout system than the
 /// flat one implemented here.
 #[derive(Debug, Clone, PartialEq)]
@@ -32,15 +32,20 @@ pub enum TypeName {
     /// A named enum type declared with `enum Name: ...`. Represented at
     /// runtime as a plain `int` tag (variant declaration order, starting
     /// at 0) -- printing an enum value shows that numeric tag in v0.1;
-    /// string variant names at runtime are a v0.2 roadmap item.
+    /// string variant names at runtime aren't implemented yet.
     Enum(String),
     /// A dictionary literal's type: v0.1 dictionaries have a fixed,
     /// compile-time-known set of string keys (inferred from the literal
     /// that created them) each with their own value type -- structurally
     /// identical to an anonymous struct. Indexing requires a string
     /// *literal* key, resolved at compile time. General dynamic hash maps
-    /// are a v0.2 roadmap item.
+    /// aren't implemented yet.
     Dict(Vec<(String, TypeName)>),
+    /// `ptr<T>` -- a raw pointer to a `T`, manually managed with
+    /// `alloc`/`free` (see `docs/pointers.md`). `T` is restricted to
+    /// `int`/`float`/`bool`/`string`/a struct name -- `ptr<ptr<T>>`
+    /// (a pointer to a pointer) isn't supported yet.
+    Ptr(Box<TypeName>),
     /// Functions with no inferable/declared return type return unit.
     Void,
 }
@@ -65,6 +70,7 @@ impl std::fmt::Display for TypeName {
             }
             TypeName::Struct(name) => write!(f, "{name}"),
             TypeName::Enum(name) => write!(f, "{name}"),
+            TypeName::Ptr(inner) => write!(f, "ptr<{inner}>"),
             TypeName::Dict(fields) => {
                 write!(f, "{{")?;
                 for (i, (k, v)) in fields.iter().enumerate() {
@@ -177,6 +183,11 @@ pub enum LValue {
         index: Box<Expr>,
         span: Span,
     },
+    /// `*p = value` -- writes through a `ptr<T>`.
+    Deref {
+        target: Box<Expr>,
+        span: Span,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -240,7 +251,7 @@ pub enum Stmt {
     /// `try: ... failed err: ... finally: ...`
     ///
     /// v0.1 has no runtime error/exception type yet (see
-    /// `docs/roadmap.md`), so `failed_block` is type-checked but never
+    /// below), so `failed_block` is type-checked but never
     /// reachable; `finally_block` always runs immediately after
     /// `try_block`, which trivially satisfies "finally always executes"
     /// until real fallible operations exist.
@@ -252,7 +263,7 @@ pub enum Stmt {
         span: Span,
     },
     /// `thread: ...` -- v0.1 runs the block inline/synchronously; real
-    /// OS-thread execution is a roadmap item.
+    /// OS-thread execution isn't implemented yet.
     Thread {
         body: Block,
         span: Span,
@@ -280,6 +291,13 @@ pub enum BinOp {
 pub enum UnOp {
     Neg,
     Not,
+    /// `*p` -- dereference a `ptr<T>`, yielding the `T` it points to.
+    Deref,
+    /// `&x` -- address-of a local variable, yielding a `ptr<T>`. Only
+    /// valid when `expr` is a plain identifier (checked in sema, not
+    /// the parser, so the error message can name the actual expression
+    /// that isn't addressable).
+    AddrOf,
 }
 
 #[derive(Debug, Clone)]
@@ -322,9 +340,29 @@ pub enum Expr {
         span: Span,
     },
     /// `await expr` -- v0.1 evaluates `expr` synchronously and returns its
-    /// value unchanged; a real async runtime is a roadmap item.
+    /// value unchanged; a real async runtime isn't implemented yet.
     Await {
         expr: Box<Expr>,
+        span: Span,
+    },
+    /// `null` -- the null-pointer literal. Its type is never known from
+    /// the literal alone (see `docs/pointers.md`); sema resolves it from
+    /// context (an annotated/already-declared `ptr<T>` target, or the
+    /// other side of a `==`/`!=` comparison).
+    NullLit(Span),
+    /// `alloc(T)` -- heap-allocates one zero-initialized `T` and returns
+    /// a `ptr<T>` to it. `ty` is a type, not a value, hence its own AST
+    /// node rather than reusing `Call` -- see `docs/pointers.md`.
+    Alloc {
+        ty: TypeName,
+        span: Span,
+    },
+    /// `alloc_n(T, count)` -- heap-allocates `count` contiguous,
+    /// zero-initialized `T`s and returns a `ptr<T>` to the first one.
+    /// See `docs/pointers.md`.
+    AllocN {
+        ty: TypeName,
+        count: Box<Expr>,
         span: Span,
     },
 }
@@ -345,6 +383,9 @@ impl Expr {
             | Expr::Unary { span: s, .. }
             | Expr::Binary { span: s, .. }
             | Expr::Call { span: s, .. }
+            | Expr::NullLit(s)
+            | Expr::Alloc { span: s, .. }
+            | Expr::AllocN { span: s, .. }
             | Expr::Await { span: s, .. } => *s,
         }
     }

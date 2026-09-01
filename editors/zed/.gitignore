@@ -1,0 +1,9 @@
+# Zed creates and manages this directory itself when it clones/compiles
+# the grammar named in extension.toml -- it must never be committed.
+# If it exists in the repo already (even empty), Zed refuses to
+# compile the grammar with an error like:
+#   "grammar directory '.../grammars/kite' already exists, but is not
+#    a git clone of '<repository>'"
+# (see https://github.com/zed-industries/zed/issues/10569, the exact
+# failure this repo hit before this file existed).
+grammars/

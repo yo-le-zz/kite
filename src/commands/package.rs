@@ -7,8 +7,7 @@
 //! top of: the `[dependencies]` table in `kite.toml`, a `kite.lock`
 //! snapshot of resolved versions, and a local `.kite-cache/` directory
 //! where downloaded package sources would land. Actually fetching and
-//! compiling a dependency's sources is a v0.2 roadmap item -- see
-//! `docs/roadmap.md`.
+//! compiling a dependency's sources isn't implemented yet.
 
 use anyhow::{bail, Result};
 use colored::Colorize;
@@ -37,7 +36,7 @@ pub fn add(package_spec: &str) -> Result<()> {
     let verb = if already_present { "Updated" } else { "Added" };
     println!("{:>12} {name} = \"{version}\"", verb.green().bold());
     println!(
-        "{:>12} v0.1 records dependencies in `kite.toml` but does not yet fetch or compile them (see docs/roadmap.md)",
+        "{:>12} v0.1 records dependencies in `kite.toml` but does not yet fetch or compile them",
         "Note".yellow().bold()
     );
     Ok(())

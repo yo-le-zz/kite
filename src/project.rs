@@ -25,7 +25,7 @@ pub struct Manifest {
     /// this table and a local `.kite-cache/` directory, but there is no
     /// package *registry* to resolve against yet -- no network fetch, no
     /// real dependency-graph resolution, no compilation of downloaded
-    /// dependency sources. That is a v0.2 roadmap item (`docs/roadmap.md`).
+    /// dependency sources. That isn't implemented yet.
     /// `kite add` records the request; `kite build` does not yet do
     /// anything with it.
     #[serde(default)]

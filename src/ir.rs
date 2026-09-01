@@ -13,7 +13,7 @@
 //! copies the header, which copies the `data` pointer, giving Python-like
 //! reference/aliasing behavior "for free" from a plain value copy.
 //! `append`/`len` are the two builtin operations that make growability
-//! observable in v0.1; more list operations are a roadmap item.
+//! observable in v0.1; more list operations aren't implemented yet.
 //!
 //! ## Aggregates otherwise stay local
 //!
@@ -26,7 +26,7 @@
 //! ## `try` / `finally`
 //!
 //! There is no runtime error/exception type yet (`failed` is
-//! type-checked by sema but never reachable -- see `docs/roadmap.md`), so
+//! type-checked by sema but never reachable), so
 //! the only way to leave a `try` block early is `return`, `break`, or
 //! `continue`. `FunctionLowerer::finally_stack` tracks every
 //! `finally` block whose `try` is currently "in scope"; lowering any of
@@ -55,6 +55,10 @@ pub enum IrType {
     Tuple(Vec<IrType>),
     /// A named struct type, declared once at module scope.
     StructRef(String),
+    /// `ptr<T>` -- a raw pointer to a `T`. `ptr<ptr<T>>` isn't
+    /// implemented yet, so this never nests (enforced in sema, see
+    /// `check_alloc`).
+    Ptr(Box<IrType>),
 }
 
 impl From<&TypeName> for IrType {
@@ -72,6 +76,7 @@ impl From<&TypeName> for IrType {
             }
             TypeName::Struct(name) => IrType::StructRef(name.clone()),
             TypeName::Enum(_) => IrType::I64,
+            TypeName::Ptr(inner) => IrType::Ptr(Box::new(IrType::from(inner.as_ref()))),
         }
     }
 }
@@ -94,6 +99,7 @@ impl fmt::Display for IrType {
                     .join(", ")
             ),
             IrType::StructRef(n) => write!(f, "{n}"),
+            IrType::Ptr(inner) => write!(f, "ptr<{inner}>"),
         }
     }
 }
@@ -118,6 +124,10 @@ pub enum IrValue {
     Param(String),
     /// A numbered SSA-like temporary produced by a previous instruction.
     Temp(u32),
+    /// The `null` pointer literal, at the given pointee type (e.g.
+    /// `ConstNull(IrType::I64)` for a `ptr<int>` -- LLVM's typed
+    /// pointers need to know that to emit `i64* null` correctly).
+    ConstNull(Box<IrType>),
 }
 
 pub type Temp = u32;
@@ -238,7 +248,7 @@ pub enum IrInstr {
     /// `read_file(path)` -- reads the whole file into a fresh heap
     /// buffer. On any failure (missing file, permissions, ...) yields
     /// `""` rather than aborting -- pair with `file_exists`/checking
-    /// `len(...) == 0` to detect that, since v0.1.2 has no real error
+    /// `len(...) == 0` to detect that, since v0.1.3 has no real error
     /// type to raise instead (see `docs/architecture.md`).
     ReadFile {
         dest: Temp,
@@ -266,6 +276,66 @@ pub enum IrInstr {
     Arg {
         dest: Temp,
         index: IrValue,
+    },
+    /// `alloc(T)` -- heap-allocates one zero-initialized `T`.
+    Alloc {
+        dest: Temp,
+        pointee_ty: IrType,
+    },
+    /// `alloc_n(T, count)` -- heap-allocates `count` contiguous
+    /// zero-initialized `T`s.
+    AllocN {
+        dest: Temp,
+        pointee_ty: IrType,
+        count: IrValue,
+    },
+    /// `free(p)` -- frees a pointer from `Alloc`/`AllocN`.
+    Free {
+        ptr: IrValue,
+        pointee_ty: IrType,
+    },
+    /// `*p` (as an expression) -- reads the `T` at the address `ptr`
+    /// points to.
+    PtrLoad {
+        dest: Temp,
+        ptr: IrValue,
+        pointee_ty: IrType,
+    },
+    /// `*p = value` -- writes `value` to the address `ptr` points to.
+    PtrStore {
+        ptr: IrValue,
+        value: IrValue,
+        pointee_ty: IrType,
+    },
+    /// `&x` -- the address of local scalar `x`. Local scalars are
+    /// already `alloca`'d (i.e. addressable) throughout their
+    /// lifetime, so this is just handing back that existing address
+    /// rather than allocating anything new.
+    AddrOf {
+        dest: Temp,
+        name: String,
+    },
+    /// `p + n` / `p - n` (`negate`) -- pointer arithmetic, moving `p` by
+    /// `n` *elements* of `pointee_ty` (codegen scales by `sizeof`, via
+    /// LLVM `getelementptr`, not raw bytes).
+    PtrOffset {
+        dest: Temp,
+        ptr: IrValue,
+        offset: IrValue,
+        pointee_ty: IrType,
+        negate: bool,
+    },
+    /// `p == q` / `p != q` (`negate`) -- pointer equality, comparing
+    /// addresses. A dedicated instruction rather than going through
+    /// `BinOp` because (unlike `EqI`/`EqStr`/...) the LLVM pointer type
+    /// to compare at varies per call site and needs to be known
+    /// statically here, not recovered generically in codegen.
+    PtrEq {
+        dest: Temp,
+        lhs: IrValue,
+        rhs: IrValue,
+        pointee_ty: IrType,
+        negate: bool,
     },
     BinOp {
         dest: Temp,
@@ -735,7 +805,12 @@ impl FunctionLowerer {
 
     fn lower_stmt(&mut self, stmt: &ast::Stmt) {
         match stmt {
-            ast::Stmt::Assign { target, value, .. } => self.lower_assign(target, value),
+            ast::Stmt::Assign {
+                target,
+                annotated_type,
+                value,
+                ..
+            } => self.lower_assign(target, annotated_type.as_ref(), value),
             ast::Stmt::Expr(expr) => {
                 self.lower_expr(expr);
             }
@@ -820,14 +895,26 @@ impl FunctionLowerer {
         }
     }
 
-    fn lower_assign(&mut self, target: &ast::LValue, value: &ast::Expr) {
+    fn lower_assign(
+        &mut self,
+        target: &ast::LValue,
+        annotated_type: Option<&ast::TypeName>,
+        value: &ast::Expr,
+    ) {
         match target {
             ast::LValue::Ident(name) => {
                 if self.is_aggregate_valued(value) {
                     self.lower_aggregate_into(value, name);
                     return;
                 }
-                let (val, ty) = self.lower_expr(value);
+                // `null`'s type (see `lower_expr_expecting`) comes from
+                // an explicit annotation on a fresh declaration, or
+                // `name`'s already-known type on a plain reassignment.
+                let expected: Option<IrType> = annotated_type.map(IrType::from).or_else(|| {
+                    self.local_declared(name)
+                        .then(|| self.infer_local_type(name))
+                });
+                let (val, ty) = self.lower_expr_expecting(value, expected.as_ref());
                 if !self.local_declared(name) {
                     self.body.push(IrInstr::Alloca {
                         name: name.clone(),
@@ -883,6 +970,19 @@ impl FunctionLowerer {
                     }
                 }
             }
+            ast::LValue::Deref { target, .. } => {
+                let (ptr_val, ptr_ty) = self.lower_expr(target);
+                let pointee_ty = match ptr_ty {
+                    IrType::Ptr(inner) => *inner,
+                    other => unreachable!("sema guarantees a `ptr<T>` deref target, got {other}"),
+                };
+                let (val, _) = self.lower_expr_expecting(value, Some(&pointee_ty));
+                self.body.push(IrInstr::PtrStore {
+                    ptr: ptr_val,
+                    value: val,
+                    pointee_ty,
+                });
+            }
         }
     }
 
@@ -904,6 +1004,23 @@ impl FunctionLowerer {
                         IrType::List(_) | IrType::Tuple(_) | IrType::StructRef(_)
                     )
             }
+            // `s = *p` where `p: ptr<Struct>` -- see the matching case
+            // in `lower_aggregate_into` for why this needs the
+            // aggregate path (recording a layout for `s`) rather than
+            // the plain scalar assignment path.
+            ast::Expr::Unary {
+                op: ast::UnOp::Deref,
+                expr: inner,
+                ..
+            } => matches!(
+                inner.as_ref(),
+                ast::Expr::Identifier(name, _)
+                    if self.local_declared(name)
+                        && matches!(
+                            self.infer_local_type(name),
+                            IrType::Ptr(pointee) if matches!(*pointee, IrType::StructRef(_))
+                        )
+            ),
             _ => false,
         }
     }
@@ -914,6 +1031,53 @@ impl FunctionLowerer {
     /// local `target_name`.
     fn lower_aggregate_into(&mut self, value: &ast::Expr, target_name: &str) {
         match value {
+            ast::Expr::Unary {
+                op: ast::UnOp::Deref,
+                expr: inner,
+                ..
+            } => {
+                // `s = *p` where `p: ptr<Struct>` -- a genuine
+                // byte-for-byte copy of the struct `p` points to (see
+                // `PtrLoad`), same value semantics as `b = a` between
+                // two ordinary struct locals below -- *not* aliasing:
+                // `s` gets its own independent storage. Recording the
+                // layout (last line here) is the only reason this needs
+                // its own case instead of falling through to the plain
+                // scalar-assignment path: field access on `s` afterward
+                // (`s.x`) looks its shape up via `layout_of`, which only
+                // ever learns about a local through a `NoteLayout`
+                // instruction like this one.
+                let (ptr_val, ptr_ty) = self.lower_expr(inner);
+                let pointee_ty = match ptr_ty {
+                    IrType::Ptr(inner_ty) => *inner_ty,
+                    other => {
+                        unreachable!("sema guarantees a `ptr<T>` deref target, got {other}")
+                    }
+                };
+                let IrType::StructRef(struct_name) = &pointee_ty else {
+                    unreachable!("`is_aggregate_valued` only takes this path for a struct pointee")
+                };
+                self.body.push(IrInstr::Alloca {
+                    name: target_name.to_string(),
+                    ty: pointee_ty.clone(),
+                });
+                let dest = self.fresh_temp();
+                self.body.push(IrInstr::PtrLoad {
+                    dest,
+                    ptr: ptr_val,
+                    pointee_ty: pointee_ty.clone(),
+                });
+                self.body.push(IrInstr::Store {
+                    name: target_name.to_string(),
+                    value: IrValue::Temp(dest),
+                });
+                self.body.push(IrInstr::NoteLayout {
+                    name: target_name.to_string(),
+                    layout: AggLayout::Struct {
+                        name: struct_name.clone(),
+                    },
+                });
+            }
             ast::Expr::Identifier(src_name, _) => {
                 // `b = a` where `a` is itself a list/tuple/dict/struct:
                 // copy the header/struct by value. For a list this copies
@@ -1390,6 +1554,32 @@ impl FunctionLowerer {
     }
 
     fn lower_expr(&mut self, expr: &ast::Expr) -> (IrValue, IrType) {
+        self.lower_expr_expecting(expr, None)
+    }
+
+    /// Like `lower_expr`, but resolves `null` from `expected` (used
+    /// exactly where sema's `check_expr_expecting` does: an
+    /// annotated/already-declared assignment target, or the other side
+    /// of a `==`/`!=` comparison). Sema has already guaranteed every
+    /// `NullLit` that reaches here has a real expected type -- a
+    /// program where it couldn't be inferred never got past sema, so
+    /// `expected` being `None` here for a `NullLit` is a compiler bug,
+    /// not a user-facing error.
+    fn lower_expr_expecting(
+        &mut self,
+        expr: &ast::Expr,
+        expected: Option<&IrType>,
+    ) -> (IrValue, IrType) {
+        if let ast::Expr::NullLit(_) = expr {
+            let ty = expected
+                .cloned()
+                .expect("sema guarantees `null`'s type is always inferable here");
+            return (IrValue::ConstNull(Box::new(ty.clone())), ty);
+        }
+        self.lower_expr_inner(expr)
+    }
+
+    fn lower_expr_inner(&mut self, expr: &ast::Expr) -> (IrValue, IrType) {
         match expr {
             ast::Expr::IntLiteral(v, _) => (IrValue::ConstInt(*v), IrType::I64),
             ast::Expr::FloatLiteral(v, _) => (IrValue::ConstFloat(*v), IrType::F64),
@@ -1402,6 +1592,29 @@ impl FunctionLowerer {
             ast::Expr::Binary { op, lhs, rhs, .. } => self.lower_binary(*op, lhs, rhs),
             ast::Expr::Call { name, args, .. } => self.lower_call(name, args),
             ast::Expr::Await { expr, .. } => self.lower_expr(expr),
+            ast::Expr::NullLit(_) => {
+                unreachable!("handled in lower_expr_expecting before reaching lower_expr_inner")
+            }
+            ast::Expr::Alloc { ty, .. } => {
+                let pointee_ty = IrType::from(ty);
+                let dest = self.fresh_temp();
+                self.body.push(IrInstr::Alloc {
+                    dest,
+                    pointee_ty: pointee_ty.clone(),
+                });
+                (IrValue::Temp(dest), IrType::Ptr(Box::new(pointee_ty)))
+            }
+            ast::Expr::AllocN { ty, count, .. } => {
+                let pointee_ty = IrType::from(ty);
+                let (count_val, _) = self.lower_expr(count);
+                let dest = self.fresh_temp();
+                self.body.push(IrInstr::AllocN {
+                    dest,
+                    pointee_ty: pointee_ty.clone(),
+                    count: count_val,
+                });
+                (IrValue::Temp(dest), IrType::Ptr(Box::new(pointee_ty)))
+            }
             ast::Expr::Field { base, field, .. } => {
                 // `EnumName.Variant` -- resolved to its integer tag here
                 // rather than going through the aggregate field-access
@@ -1487,6 +1700,19 @@ impl FunctionLowerer {
     }
 
     fn lower_unary(&mut self, op: UnOp, expr: &ast::Expr) -> (IrValue, IrType) {
+        if op == UnOp::AddrOf {
+            let ast::Expr::Identifier(name, _) = expr else {
+                unreachable!("sema guarantees `&` only ever targets a plain identifier")
+            };
+            let pointee_ty = self.infer_local_type(name);
+            let dest = self.fresh_temp();
+            self.body.push(IrInstr::AddrOf {
+                dest,
+                name: name.clone(),
+            });
+            return (IrValue::Temp(dest), IrType::Ptr(Box::new(pointee_ty)));
+        }
+
         let (val, ty) = self.lower_expr(expr);
         let dest = self.fresh_temp();
         match op {
@@ -1502,6 +1728,19 @@ impl FunctionLowerer {
                 self.body.push(IrInstr::Not { dest, value: val });
                 (IrValue::Temp(dest), IrType::Bool)
             }
+            UnOp::Deref => {
+                let pointee_ty = match ty {
+                    IrType::Ptr(inner) => *inner,
+                    other => unreachable!("sema guarantees a `ptr<T>` deref target, got {other}"),
+                };
+                self.body.push(IrInstr::PtrLoad {
+                    dest,
+                    ptr: val,
+                    pointee_ty: pointee_ty.clone(),
+                });
+                (IrValue::Temp(dest), pointee_ty)
+            }
+            UnOp::AddrOf => unreachable!("handled above"),
         }
     }
 
@@ -1510,8 +1749,68 @@ impl FunctionLowerer {
             return self.lower_short_circuit(op, lhs, rhs);
         }
 
-        let (lval, lty) = self.lower_expr(lhs);
-        let (rval, _) = self.lower_expr(rhs);
+        // `null` needs its type from the *other* operand -- see
+        // `lower_expr_expecting` -- so for `==`/`!=` specifically, one
+        // side is lowered first and its type fed in as a hint for the
+        // other, same as sema's `check_binary` does.
+        let (lval, lty, rval, rty) =
+            if matches!(op, BinOp::Eq | BinOp::NotEq) && matches!(lhs, ast::Expr::NullLit(_)) {
+                let (rval, rty) = self.lower_expr(rhs);
+                let (lval, lty) = self.lower_expr_expecting(lhs, Some(&rty));
+                (lval, lty, rval, rty)
+            } else if matches!(op, BinOp::Eq | BinOp::NotEq) {
+                let (lval, lty) = self.lower_expr(lhs);
+                let (rval, rty) = self.lower_expr_expecting(rhs, Some(&lty));
+                (lval, lty, rval, rty)
+            } else {
+                let (lval, lty) = self.lower_expr(lhs);
+                let (rval, rty) = self.lower_expr(rhs);
+                (lval, lty, rval, rty)
+            };
+
+        // Pointer arithmetic: `p + n`/`p - n` (element offset, not raw
+        // bytes -- codegen scales by `sizeof(pointee)` via GEP).
+        if matches!(op, BinOp::Add | BinOp::Sub) {
+            let ptr_on_left = matches!(&lty, IrType::Ptr(_)) && rty == IrType::I64;
+            let ptr_on_right =
+                op == BinOp::Add && lty == IrType::I64 && matches!(&rty, IrType::Ptr(_));
+            if ptr_on_left || ptr_on_right {
+                let (ptr_val, ptr_ty, offset_val, negate) = if ptr_on_left {
+                    (lval, lty, rval, op == BinOp::Sub)
+                } else {
+                    (rval, rty, lval, false)
+                };
+                let IrType::Ptr(pointee_ty) = ptr_ty else {
+                    unreachable!("just matched Ptr above")
+                };
+                let dest = self.fresh_temp();
+                self.body.push(IrInstr::PtrOffset {
+                    dest,
+                    ptr: ptr_val,
+                    offset: offset_val,
+                    pointee_ty: *pointee_ty.clone(),
+                    negate,
+                });
+                return (IrValue::Temp(dest), IrType::Ptr(pointee_ty));
+            }
+        }
+
+        // Pointer equality: compares the addresses directly, not
+        // anything about what they point to.
+        if matches!(op, BinOp::Eq | BinOp::NotEq) {
+            if let IrType::Ptr(pointee_ty) = &lty {
+                let dest = self.fresh_temp();
+                self.body.push(IrInstr::PtrEq {
+                    dest,
+                    lhs: lval,
+                    rhs: rval,
+                    pointee_ty: (**pointee_ty).clone(),
+                    negate: op == BinOp::NotEq,
+                });
+                return (IrValue::Temp(dest), IrType::Bool);
+            }
+        }
+
         let is_float = lty == IrType::F64;
         let is_str = lty == IrType::Str;
 
@@ -1751,6 +2050,18 @@ impl FunctionLowerer {
             let dest = self.fresh_temp();
             self.body.push(IrInstr::Arg { dest, index });
             return (IrValue::Temp(dest), IrType::Str);
+        }
+
+        if name == "free" {
+            let (ptr, ptr_ty) = self.lower_expr(&args[0]);
+            let pointee_ty = match ptr_ty {
+                IrType::Ptr(inner) => *inner,
+                other => {
+                    unreachable!("sema guarantees `free`'s argument is a `ptr<T>`, got {other}")
+                }
+            };
+            self.body.push(IrInstr::Free { ptr, pointee_ty });
+            return (IrValue::ConstInt(0), IrType::Void);
         }
 
         let mut arg_vals = Vec::new();

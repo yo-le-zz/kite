@@ -17,8 +17,8 @@
 //! rest of the compiler small: everything downstream of this module
 //! (sema, IR lowering, codegen) still only ever sees one flat,
 //! already-merged `ast::Program`, exactly as it did for a single file.
-//! Per-symbol visibility and qualified `module.function()` calls are a
-//! v0.2 roadmap item.
+//! Per-symbol visibility and qualified `module.function()` calls
+//! aren't supported yet.
 
 use crate::ast::{EnumDef, Function, Import, Program, StructDef};
 use crate::diagnostics::{Diagnostic, DiagnosticBag, Span};

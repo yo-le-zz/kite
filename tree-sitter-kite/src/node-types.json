@@ -22,6 +22,10 @@
             "named": true
           },
           {
+            "type": "pointer_type",
+            "named": true
+          },
+          {
             "type": "primitive_type",
             "named": true
           }
@@ -411,6 +415,10 @@
           "named": true
         },
         {
+          "type": "null_literal",
+          "named": true
+        },
+        {
           "type": "parenthesized_expression",
           "named": true
         },
@@ -631,6 +639,10 @@
             "named": true
           },
           {
+            "type": "pointer_type",
+            "named": true
+          },
+          {
             "type": "primitive_type",
             "named": true
           }
@@ -784,6 +796,10 @@
             "named": true
           },
           {
+            "type": "pointer_type",
+            "named": true
+          },
+          {
             "type": "primitive_type",
             "named": true
           }
@@ -819,6 +835,30 @@
           "named": true
         }
       ]
+    }
+  },
+  {
+    "type": "pointer_type",
+    "named": true,
+    "fields": {
+      "pointee": {
+        "multiple": false,
+        "required": true,
+        "types": [
+          {
+            "type": "identifier",
+            "named": true
+          },
+          {
+            "type": "pointer_type",
+            "named": true
+          },
+          {
+            "type": "primitive_type",
+            "named": true
+          }
+        ]
+      }
     }
   },
   {
@@ -938,6 +978,10 @@
             "named": true
           },
           {
+            "type": "pointer_type",
+            "named": true
+          },
+          {
             "type": "primitive_type",
             "named": true
           }
@@ -1041,6 +1085,14 @@
         "required": true,
         "types": [
           {
+            "type": "&",
+            "named": false
+          },
+          {
+            "type": "*",
+            "named": false
+          },
+          {
             "type": "-",
             "named": false
           },
@@ -1100,6 +1152,10 @@
   },
   {
     "type": "%",
+    "named": false
+  },
+  {
+    "type": "&",
     "named": false
   },
   {
@@ -1276,11 +1332,19 @@
     "named": false
   },
   {
+    "type": "null_literal",
+    "named": true
+  },
+  {
     "type": "or",
     "named": false
   },
   {
     "type": "orif",
+    "named": false
+  },
+  {
+    "type": "ptr",
     "named": false
   },
   {

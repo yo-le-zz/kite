@@ -1,6 +1,6 @@
 //! Token kinds produced by the lexer.
 //!
-//! Kite v0.1.2 uses Python-style indentation to delimit blocks, so the
+//! Kite v0.1.3 uses Python-style indentation to delimit blocks, so the
 //! token stream includes structural `Newline`/`Indent`/`Dedent` tokens in
 //! addition to the usual lexical categories.
 
@@ -51,6 +51,13 @@ pub enum TokenKind {
     KwFloat,
     KwBool,
     KwString,
+    /// `ptr` -- the pointer type constructor, e.g. `ptr<int>`. See
+    /// `docs/pointers.md`.
+    KwPtr,
+    /// `null` -- the null-pointer literal. Only valid where a `ptr<T>`
+    /// is expected (an annotated/already-declared pointer variable, or
+    /// compared against another pointer); see `docs/pointers.md`.
+    KwNull,
 
     // Punctuation
     LParen,   // (
@@ -77,6 +84,10 @@ pub enum TokenKind {
     LtEq,
     GtEq,
     Eq,
+    /// `&` -- address-of a local variable (`&x`), producing a `ptr<T>`.
+    /// Not a bitwise-and operator -- Kite doesn't have one yet (see
+    /// `docs/pointers.md`).
+    Amp,
 
     // Structural
     Newline,
@@ -126,6 +137,8 @@ impl fmt::Display for TokenKind {
             KwFloat => write!(f, "`float`"),
             KwBool => write!(f, "`bool`"),
             KwString => write!(f, "`string`"),
+            KwPtr => write!(f, "`ptr`"),
+            KwNull => write!(f, "`null`"),
             LParen => write!(f, "`(`"),
             RParen => write!(f, "`)`"),
             LBracket => write!(f, "`[`"),
@@ -148,6 +161,7 @@ impl fmt::Display for TokenKind {
             LtEq => write!(f, "`<=`"),
             GtEq => write!(f, "`>=`"),
             Eq => write!(f, "`=`"),
+            Amp => write!(f, "`&`"),
             Newline => write!(f, "end of line"),
             Indent => write!(f, "indented block"),
             Dedent => write!(f, "end of indented block"),
@@ -205,6 +219,8 @@ pub fn lookup_keyword(ident: &str) -> Option<TokenKind> {
         "float" => KwFloat,
         "bool" => KwBool,
         "string" => KwString,
+        "ptr" => KwPtr,
+        "null" => KwNull,
         _ => return None,
     })
 }

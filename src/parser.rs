@@ -272,6 +272,13 @@ impl Parser {
             TokenKind::KwFloat => TypeName::Float,
             TokenKind::KwBool => TypeName::Bool,
             TokenKind::KwString => TypeName::String,
+            TokenKind::KwPtr => {
+                self.advance();
+                self.expect(TokenKind::Lt)?;
+                let inner = self.parse_type()?;
+                self.expect(TokenKind::Gt)?;
+                return Ok(TypeName::Ptr(Box::new(inner)));
+            }
             TokenKind::Identifier(name) => TypeName::Struct(name),
             other => {
                 self.diagnostics.push(Diagnostic::error(
@@ -408,6 +415,8 @@ impl Parser {
             TokenKind::Try => self.parse_try(),
             TokenKind::Thread => self.parse_thread(),
             TokenKind::Identifier(_) if self.looks_like_assignment() => self.parse_assign(),
+            TokenKind::Star => self.parse_expr_led_statement(),
+            TokenKind::LParen => self.parse_expr_led_statement(),
             _ => {
                 let expr = self.parse_expr()?;
                 self.expect(TokenKind::Newline)?;
@@ -458,6 +467,52 @@ impl Parser {
 
     fn token_at(&self, i: usize) -> &TokenKind {
         &self.tokens[i.min(self.tokens.len() - 1)].kind
+    }
+
+    /// Handles any statement starting with `*` or `(`: parses a full
+    /// unary-level expression -- covering plain derefs (`*p`),
+    /// parenthesized ones (`(*p).x`, `*(r + i)`), and anything else
+    /// that grammar reaches -- then looks at what follows to tell an
+    /// assignment (`target = value`) apart from a bare expression
+    /// statement, converting the parsed expression into an `LValue` via
+    /// `expr_to_lvalue` in the assignment case. Simpler and more robust
+    /// than trying to predict which case it is by scanning tokens ahead
+    /// of time.
+    fn parse_expr_led_statement(&mut self) -> PResult<Stmt> {
+        let start_span = self.peek_span();
+        let target = self.parse_unary()?;
+
+        if self.at(TokenKind::Eq) {
+            self.advance();
+            let value = self.parse_expr()?;
+            self.expect(TokenKind::Newline)?;
+            let span = start_span.to(value.span());
+            let target_span = target.span();
+            let Some(lvalue) = expr_to_lvalue(target) else {
+                self.diagnostics.push(Diagnostic::error(
+                    "E0098",
+                    "this expression can't be assigned to",
+                    target_span,
+                ));
+                return Err(());
+            };
+            Ok(Stmt::Assign {
+                target: lvalue,
+                annotated_type: None,
+                value,
+                span,
+            })
+        } else {
+            // Not an assignment -- a bare expression statement (e.g.
+            // `*p` alone, dereferencing purely for a side effect
+            // elsewhere). Doesn't support continuing with a further
+            // binary operator here (`*p + 1` as a whole statement, its
+            // result discarded) -- narrow enough, being both unusual to
+            // write and useless once written, that it isn't worth the
+            // extra parsing machinery; write `x = *p + 1` instead.
+            self.expect(TokenKind::Newline)?;
+            Ok(Stmt::Expr(target))
+        }
     }
 
     fn parse_assign(&mut self) -> PResult<Stmt> {
@@ -819,6 +874,24 @@ impl Parser {
                 expr: Box::new(expr),
                 span,
             })
+        } else if self.at(TokenKind::Star) {
+            let start = self.advance().span;
+            let expr = self.parse_unary()?;
+            let span = start.to(expr.span());
+            Ok(Expr::Unary {
+                op: UnOp::Deref,
+                expr: Box::new(expr),
+                span,
+            })
+        } else if self.at(TokenKind::Amp) {
+            let start = self.advance().span;
+            let expr = self.parse_unary()?;
+            let span = start.to(expr.span());
+            Ok(Expr::Unary {
+                op: UnOp::AddrOf,
+                expr: Box::new(expr),
+                span,
+            })
         } else {
             self.parse_postfix()
         }
@@ -902,6 +975,37 @@ impl Parser {
             TokenKind::False => {
                 self.advance();
                 Ok(Expr::BoolLiteral(false, span))
+            }
+            TokenKind::KwNull => {
+                self.advance();
+                Ok(Expr::NullLit(span))
+            }
+            TokenKind::Identifier(name)
+                if name == "alloc" && *self.peek_at(1) == TokenKind::LParen =>
+            {
+                self.advance();
+                self.advance(); // `(`
+                let ty = self.parse_type()?;
+                let end = self.expect(TokenKind::RParen)?.span;
+                Ok(Expr::Alloc {
+                    ty,
+                    span: span.to(end),
+                })
+            }
+            TokenKind::Identifier(name)
+                if name == "alloc_n" && *self.peek_at(1) == TokenKind::LParen =>
+            {
+                self.advance();
+                self.advance(); // `(`
+                let ty = self.parse_type()?;
+                self.expect(TokenKind::Comma)?;
+                let count = self.parse_expr()?;
+                let end = self.expect(TokenKind::RParen)?.span;
+                Ok(Expr::AllocN {
+                    ty,
+                    count: Box::new(count),
+                    span: span.to(end),
+                })
             }
             TokenKind::Identifier(name) => {
                 self.advance();
@@ -1026,11 +1130,38 @@ impl Parser {
     }
 }
 
+/// The reverse of `lvalue_to_expr`: converts an already-parsed
+/// expression into an `LValue`, for the `*`/`(`-led statement dispatch
+/// in `parse_expr_led_statement` (which parses a general expression
+/// first, since deref/field/index targets can nest arbitrarily --
+/// `(*p).x`, `*(r + i)` -- then decides after the fact whether it was
+/// actually an assignment target). Returns `None` for anything that
+/// isn't a valid assignment target (a literal, a binary expression,
+/// ...), which the caller turns into a diagnostic.
+fn expr_to_lvalue(expr: Expr) -> Option<LValue> {
+    match expr {
+        Expr::Identifier(name, _) => Some(LValue::Ident(name)),
+        Expr::Field { base, field, span } => Some(LValue::Field { base, field, span }),
+        Expr::Index { base, index, span } => Some(LValue::Index { base, index, span }),
+        Expr::Unary {
+            op: UnOp::Deref,
+            expr,
+            span,
+        } => Some(LValue::Deref { target: expr, span }),
+        _ => None,
+    }
+}
+
 fn lvalue_to_expr(lvalue: LValue, fallback_span: Span) -> Expr {
     match lvalue {
         LValue::Ident(name) => Expr::Identifier(name, fallback_span),
         LValue::Field { base, field, span } => Expr::Field { base, field, span },
         LValue::Index { base, index, span } => Expr::Index { base, index, span },
+        LValue::Deref { target, span } => Expr::Unary {
+            op: UnOp::Deref,
+            expr: target,
+            span,
+        },
     }
 }
 

@@ -79,7 +79,7 @@ Each `+` allocates a fresh string; it never mutates either operand
 
 ## Files
 
-Kite v0.1.2 has no real error/exception type yet (see
+Kite v0.1.3 has no real error/exception type yet (see
 `docs/architecture.md`), so these two report failure the simplest way
 that's still checkable: an empty string, or `false`.
 
@@ -140,3 +140,11 @@ $ kite build && ./target/myprogram foo bar
 foo
 bar
 ```
+
+## Pointers
+
+`alloc`/`alloc_n`/`free` (plus `*p`, `&x`, and `null`, which aren't
+functions but work alongside them) are covered on their own in
+[`docs/pointers.md`](pointers.md) -- there's enough to them (memory
+semantics, what's and isn't safe) to deserve a dedicated page rather
+than a short entry here.

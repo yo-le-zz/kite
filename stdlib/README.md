@@ -3,7 +3,7 @@
 This directory is a **design scaffold**, not compiled code: `kite build`
 does not currently resolve `use`/`from ... import` against anything here
 (imports are parsed and type-checked as no-ops in v0.1 -- see
-`docs/roadmap.md`). Each `.ki` file below sketches the intended surface
+not yet implemented). Each `.ki` file below sketches the intended surface
 of a future standard-library module, Python-flavored, so the eventual
 implementation has a concrete shape to build toward.
 
@@ -19,4 +19,4 @@ implementation has a concrete shape to build toward.
 | `system.ki` | Process/environment/OS information |
 
 Turning these into real, linked modules requires the aggregate-passing
-and multi-file module system described in `docs/roadmap.md`.
+and multi-file module system these will eventually sit on top of.

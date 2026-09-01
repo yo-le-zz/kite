@@ -21,17 +21,6 @@ pub enum Mode {
     Lib,
 }
 
-/// Whether the resolved build target is Windows: either an explicit
-/// `--target`/`kite.toml` triple naming it (cross-compiling), or -- when
-/// no triple was given at all, so `clang` defaults to the host -- the
-/// host we're actually running on.
-fn is_windows_target(target: Option<&str>) -> bool {
-    match target {
-        Some(triple) => triple.contains("windows"),
-        None => cfg!(windows),
-    }
-}
-
 /// Runs the build pipeline and returns the path to the produced artifact
 /// on success, so `kite run`/`kite bench` can reuse this without
 /// duplicating logic.
@@ -78,25 +67,16 @@ pub fn run(
         (None, Some(dir)) => dir.join(default_path.file_name().expect("package name is non-empty")),
         (None, None) => default_path,
     };
-    let output_path = match &mode {
-        // Windows executables need a `.exe` extension: `CreateProcess`
-        // will happily run an extensionless PE binary if you already
-        // know the exact path, but every normal way of finding/invoking
-        // one -- `cmd.exe`/PowerShell PATH lookup, Explorer double-click,
-        // `Command::new` on some setups -- expects it, and `clang`'s own
-        // Windows targets (`*-pc-windows-msvc`/`*-pc-windows-gnu`)
-        // silently add it themselves unless the `-o` name already has an
-        // extension. Only the *default* name gets this treatment (an
-        // explicit `-o out.bin` is left alone), matching how
-        // Freestanding/Lib below only fill in `.o` when nothing was
-        // specified.
-        Mode::Executable { .. } => {
-            if is_windows_target(target.as_deref()) && base_output_path.extension().is_none() {
-                base_output_path.with_extension("exe")
-            } else {
-                base_output_path
-            }
-        }
+    let mut output_path = match &mode {
+        // The default (unexplicit) name gets `.exe` filled in on
+        // Windows for an executable, `.o` for freestanding/lib -- an
+        // explicit `-o out.bin` is always left alone. For the
+        // executable case, this is only a *guess* pending confirmation
+        // below: the authoritative answer is whatever
+        // `driver::build_project` actually names the file on disk (see
+        // `driver::normalized_executable_path`), which is what
+        // `output_path` gets reassigned to right after the build call.
+        Mode::Executable { .. } => base_output_path,
         Mode::Freestanding | Mode::Lib => {
             if base_output_path.extension().is_none() {
                 base_output_path.with_extension("o")
@@ -113,7 +93,7 @@ pub fn run(
             static_link,
             extra_link_inputs,
         } => {
-            driver::build_project(
+            output_path = driver::build_project(
                 &entry_path,
                 &src_root,
                 &output_path,
@@ -170,31 +150,4 @@ pub fn run(
     }
 
     Ok(output_path)
-}
-
-#[cfg(test)]
-mod tests {
-    use super::is_windows_target;
-
-    #[test]
-    fn explicit_windows_triples_are_detected() {
-        assert!(is_windows_target(Some("x86_64-pc-windows-msvc")));
-        assert!(is_windows_target(Some("x86_64-pc-windows-gnu")));
-        assert!(is_windows_target(Some("aarch64-pc-windows-msvc")));
-    }
-
-    #[test]
-    fn explicit_non_windows_triples_are_not_detected() {
-        assert!(!is_windows_target(Some("x86_64-unknown-linux-gnu")));
-        assert!(!is_windows_target(Some("aarch64-apple-darwin")));
-        assert!(!is_windows_target(Some("wasm32-unknown-unknown")));
-    }
-
-    #[test]
-    fn no_target_falls_back_to_the_host() {
-        // Whichever OS actually runs this test -- `is_windows_target`
-        // should agree with `cfg!(windows)` when no triple was given,
-        // since that's exactly what `clang` itself defaults to.
-        assert_eq!(is_windows_target(None), cfg!(windows));
-    }
 }

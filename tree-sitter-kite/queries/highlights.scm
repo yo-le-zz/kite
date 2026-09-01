@@ -48,6 +48,9 @@
   "import"
 ] @keyword
 
+(pointer_type "ptr" @type.builtin)
+(null_literal) @constant.builtin
+
 (break_statement) @keyword
 (continue_statement) @keyword
 ["and" "or" "not"] @keyword.operator
@@ -68,6 +71,7 @@
   ">="
   "="
   "->"
+  "&"
 ] @operator
 
 ["." ":" ","] @punctuation.delimiter
@@ -103,7 +107,7 @@
 
 ; Builtins that exist without a `make` definition anywhere.
 ((identifier) @function.builtin
-  (#match? @function.builtin "^(print|append|len)$"))
+  (#match? @function.builtin "^(print|append|len|char_at|substr|read_file|write_file|arg_count|arg|alloc|alloc_n|free)$"))
 
 ; ---- parameters / loop variables -------------------------------------------
 

@@ -49,20 +49,25 @@ pub fn generate_c_header(guard_name: &str, program: &Program) -> String {
     out
 }
 
-fn c_type(ty: &TypeName) -> &'static str {
+fn c_type(ty: &TypeName) -> String {
     match ty {
-        TypeName::Int => "int64_t",
-        TypeName::Float => "double",
-        TypeName::Bool => "bool",
-        TypeName::String => "const char*",
+        TypeName::Int => "int64_t".to_string(),
+        TypeName::Float => "double".to_string(),
+        TypeName::Bool => "bool".to_string(),
+        TypeName::String => "const char*".to_string(),
         // Enums are a plain integer tag at the ABI boundary -- see
         // `ast::TypeName::Enum`'s docs.
-        TypeName::Enum(_) => "int64_t",
-        TypeName::Void => "void",
+        TypeName::Enum(_) => "int64_t".to_string(),
+        TypeName::Void => "void".to_string(),
+        // A `ptr<T>` is genuinely just `T*` at the C ABI boundary --
+        // see `docs/pointers.md`.
+        TypeName::Ptr(inner) => format!("{}*", c_type(inner)),
         // Not reachable: sema rejects list/tuple/dict/struct parameters
         // and return types before codegen ever sees them (see
         // `sema.rs`'s `is_first_class_value`).
-        TypeName::List(_) | TypeName::Tuple(_) | TypeName::Dict(_) | TypeName::Struct(_) => "void*",
+        TypeName::List(_) | TypeName::Tuple(_) | TypeName::Dict(_) | TypeName::Struct(_) => {
+            "void*".to_string()
+        }
     }
 }
 
