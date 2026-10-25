@@ -1,0 +1,208 @@
+// Kite lexer, written in Kite (bootstrap milestone 1).
+// Mirrors src/lexer/mod.rs: indentation tokens, keywords, numbers,
+// strings / f-strings, comments and longest-match operators.
+
+type Tok:
+    kind: string
+    text: string
+    line: int
+    col: int
+
+make mk(kind: string, text: string, line: int, col: int) -> Tok:
+    t = Tok()
+    t.kind = kind
+    t.text = text
+    t.line = line
+    t.col = col
+    return t
+
+make is_alpha(c: int) -> bool:
+    return (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or c == 95
+
+make is_digit(c: int) -> bool:
+    return c >= 48 and c <= 57
+
+make is_alnum(c: int) -> bool:
+    return is_alpha(c) or is_digit(c)
+
+make contains(xs: [string], s: string) -> bool:
+    for x in xs:
+        if x == s:
+            return true
+    return false
+
+make keywords() -> [string]:
+    return ["make", "extern", "return", "if", "orif", "else", "until", "while",
+            "infinit", "for", "to", "in", "break", "continue", "try", "failed",
+            "finally", "use", "from", "import", "type", "class", "match", "case",
+            "enum", "thread", "async", "await", "and", "or", "not", "true",
+            "false", "null"]
+
+make ops3() -> [string]:
+    return ["<<=", ">>="]
+
+make ops2() -> [string]:
+    return ["->", "==", "!=", "<=", ">=", "<<", ">>", "+=", "-=", "*=", "/=",
+            "%=", "&=", "|=", "^="]
+
+make ops1() -> [string]:
+    return ["(", ")", "[", "]", "{", "}", ",", ":", ".", "+", "-", "*", "/",
+            "%", "<", ">", "=", "&", "|", "^", "~"]
+
+// Width of leading whitespace on the line starting at `pos` (tabs jump to
+// the next multiple of 8, as in the Rust lexer).
+make indent_width(src: string, pos: int) -> int:
+    n = len(src)
+    w = 0
+    i = pos
+    until i >= n:
+        c = char_at(src, i)
+        if c == 32:
+            w += 1
+        orif c == 9:
+            w = w + 8 - (w % 8)
+        else:
+            return w
+        i += 1
+    return w
+
+make lex(src: string) -> [Tok]:
+    toks: [Tok] = []
+    keys = keywords()
+    o3 = ops3()
+    o2 = ops2()
+    o1 = ops1()
+    n = len(src)
+    i = 0
+    line = 1
+    col = 1
+    stack = [0]
+    depth = 0
+    at_line_start = true
+    paren = 0
+    until i >= n:
+        if at_line_start and paren == 0:
+            w = indent_width(src, i)
+            // skip the whitespace itself
+            while i < n and (char_at(src, i) == 32 or char_at(src, i) == 9):
+                i += 1
+                col += 1
+            blank = i >= n or char_at(src, i) == 10 or char_at(src, i) == 13
+            if i + 1 < n and char_at(src, i) == 47 and char_at(src, i + 1) == 47:
+                blank = true
+            if not blank:
+                if w > stack[depth]:
+                    depth += 1
+                    if depth >= len(stack):
+                        append(stack, w)
+                    else:
+                        stack[depth] = w
+                    append(toks, mk("indent", "", line, col))
+                orif w < stack[depth]:
+                    while depth > 0 and w < stack[depth]:
+                        depth -= 1
+                        append(toks, mk("dedent", "", line, col))
+            at_line_start = false
+        if i >= n:
+            break
+        c = char_at(src, i)
+        if c == 32 or c == 9 or c == 13:
+            i += 1
+            col += 1
+        orif c == 10:
+            if paren == 0:
+                append(toks, mk("newline", "", line, col))
+                at_line_start = true
+            i += 1
+            line += 1
+            col = 1
+        orif c == 47 and i + 1 < n and char_at(src, i + 1) == 47:
+            while i < n and char_at(src, i) != 10:
+                i += 1
+        orif is_alpha(c):
+            start = i
+            is_f = false
+            if c == 102 and i + 1 < n and char_at(src, i + 1) == 34:
+                is_f = true
+            if not is_f:
+                while i < n and is_alnum(char_at(src, i)):
+                    i += 1
+                word = substr(src, start, i)
+                if contains(keys, word):
+                    append(toks, mk("kw", word, line, col))
+                else:
+                    append(toks, mk("ident", word, line, col))
+                col += i - start
+            else:
+                i += 1
+                col += 1
+        orif is_digit(c):
+            start = i
+            is_float = false
+            while i < n and is_digit(char_at(src, i)):
+                i += 1
+            if i + 1 < n and char_at(src, i) == 46 and is_digit(char_at(src, i + 1)):
+                is_float = true
+                i += 1
+                while i < n and is_digit(char_at(src, i)):
+                    i += 1
+            kind = "int"
+            if is_float:
+                kind = "float"
+            append(toks, mk(kind, substr(src, start, i), line, col))
+            col += i - start
+        else:
+            // f-string prefix handled below together with plain strings
+            if c == 34:
+                start = i
+                i += 1
+                while i < n and char_at(src, i) != 34:
+                    if char_at(src, i) == 92:
+                        i += 1
+                    i += 1
+                i += 1
+                kind = "str"
+                tcol = col
+                tstart = start
+                if start > 0 and char_at(src, start - 1) == 102:
+                    kind = "fstr"
+                    tcol = col - 1
+                    tstart = start - 1
+                append(toks, mk(kind, substr(src, tstart, i), line, tcol))
+                col += i - start
+            else:
+                matched = ""
+                if i + 3 <= n and contains(o3, substr(src, i, i + 3)):
+                    matched = substr(src, i, i + 3)
+                orif i + 2 <= n and contains(o2, substr(src, i, i + 2)):
+                    matched = substr(src, i, i + 2)
+                orif contains(o1, substr(src, i, i + 1)):
+                    matched = substr(src, i, i + 1)
+                if len(matched) == 0:
+                    append(toks, mk("error", substr(src, i, i + 1), line, col))
+                    i += 1
+                    col += 1
+                else:
+                    if matched == "(" or matched == "[" or matched == "{":
+                        paren += 1
+                    orif matched == ")" or matched == "]" or matched == "}":
+                        if paren > 0:
+                            paren -= 1
+                    append(toks, mk("op", matched, line, col))
+                    i += len(matched)
+                    col += len(matched)
+    while depth > 0:
+        depth -= 1
+        append(toks, mk("dedent", "", line, col))
+    append(toks, mk("eof", "", line, col))
+    return toks
+
+make main():
+    path = arg(0)
+    src = read_file(path)
+    toks = lex(src)
+    counts = 0
+    for t in toks:
+        print(f"{t.line}:{t.col} {t.kind} {t.text}")
+        counts += 1
+    print(f"-- {counts} tokens")

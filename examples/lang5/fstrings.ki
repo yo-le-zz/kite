@@ -1,0 +1,8 @@
+make main():
+    name = "Yolezz"
+    n = 3
+    x = 2.5
+    print(f"hello {name}, n={n} x={x} ok={n > 2} {{braces}}")
+    print(f"{n + 1}")
+    l = [1, 2, 3]
+    print(f"len={len(l)} first={l[0]}")

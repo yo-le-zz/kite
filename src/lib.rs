@@ -28,11 +28,13 @@
 pub mod ast;
 pub mod cheader;
 pub mod codegen;
+pub mod desugar;
 pub mod diagnostics;
 pub mod driver;
 pub mod ir;
 pub mod lexer;
 pub mod parser;
+pub mod prelude;
 pub mod project;
 pub mod resolve;
 pub mod sema;

@@ -1,0 +1,141 @@
+// Kite prelude: string helpers written in Kite itself.
+// Only the functions a program actually references are compiled in.
+
+make starts_with(s: string, p: string) -> bool:
+    if len(p) > len(s):
+        return false
+    return substr(s, 0, len(p)) == p
+
+make ends_with(s: string, p: string) -> bool:
+    if len(p) > len(s):
+        return false
+    return substr(s, len(s) - len(p), len(s)) == p
+
+make find_from(s: string, sub: string, start: int) -> int:
+    n = len(s)
+    m = len(sub)
+    i = start
+    while i + m <= n:
+        if substr(s, i, i + m) == sub:
+            return i
+        i += 1
+    return -1
+
+make find(s: string, sub: string) -> int:
+    return find_from(s, sub, 0)
+
+make contains_str(s: string, sub: string) -> bool:
+    return find_from(s, sub, 0) >= 0
+
+make is_space(c: int) -> bool:
+    return c == 32 or c == 9 or c == 10 or c == 13
+
+make trim(s: string) -> string:
+    a = 0
+    b = len(s)
+    while a < b and is_space(char_at(s, a)):
+        a += 1
+    while b > a and is_space(char_at(s, b - 1)):
+        b -= 1
+    return substr(s, a, b)
+
+make split(s: string, sep: string) -> [string]:
+    out: [string] = []
+    if len(sep) == 0:
+        append(out, s)
+        return out
+    start = 0
+    while true:
+        i = find_from(s, sep, start)
+        if i < 0:
+            append(out, substr(s, start, len(s)))
+            return out
+        append(out, substr(s, start, i))
+        start = i + len(sep)
+    return out
+
+make join(xs: [string], sep: string) -> string:
+    r = ""
+    i = 0
+    while i < len(xs):
+        if i > 0:
+            r = r + sep
+        r = r + xs[i]
+        i += 1
+    return r
+
+make replace_all(s: string, a: string, b: string) -> string:
+    if len(a) == 0:
+        return s
+    return join(split(s, a), b)
+
+make repeat(s: string, n: int) -> string:
+    r = ""
+    i = 0
+    while i < n:
+        r = r + s
+        i += 1
+    return r
+
+make chr(c: int) -> string:
+    if c == 10:
+        return "\n"
+    if c == 9:
+        return "\t"
+    if c == 13:
+        return "\r"
+    if c == 34:
+        return "\""
+    if c == 92:
+        return "\\"
+    table = " !#$%&'()*+,-./0123456789:;<=>?@ABCDEFGHIJKLMNOPQRSTUVWXYZ[]^_`abcdefghijklmnopqrstuvwxyz{|}~"
+    if c < 32 or c > 126:
+        return "?"
+    k = c - 32
+    if c > 34:
+        k = c - 33
+    if c > 92:
+        k = c - 34
+    return substr(table, k, k + 1)
+
+make to_int(s: string) -> int:
+    t = trim(s)
+    neg = false
+    i = 0
+    if len(t) > 0 and char_at(t, 0) == 45:
+        neg = true
+        i = 1
+    r = 0
+    while i < len(t):
+        c = char_at(t, i)
+        if c < 48 or c > 57:
+            break
+        r = r * 10 + (c - 48)
+        i += 1
+    if neg:
+        return 0 - r
+    return r
+
+make is_alpha(c: int) -> bool:
+    return (c >= 97 and c <= 122) or (c >= 65 and c <= 90) or c == 95
+
+make is_digit(c: int) -> bool:
+    return c >= 48 and c <= 57
+
+make is_alnum(c: int) -> bool:
+    return is_alpha(c) or is_digit(c)
+
+make min(a: int, b: int) -> int:
+    if a < b:
+        return a
+    return b
+
+make max(a: int, b: int) -> int:
+    if a > b:
+        return a
+    return b
+
+make abs(a: int) -> int:
+    if a < 0:
+        return 0 - a
+    return a

@@ -1,0 +1,23 @@
+type Node:
+    v: int
+    next: ptr<Node>
+make main():
+    a = alloc(Node)
+    b = alloc(Node)
+    x = *a
+    x.v = 1
+    x.next = b
+    *a = x
+    y = *b
+    y.v = 2
+    y.next = null
+    *b = y
+    p = a
+    total = 0
+    while p != null:
+        n = *p
+        total += n.v
+        p = n.next
+    print(total)
+make find_last(p: ptr<Node>) -> ptr<Node>:
+    return null

@@ -94,8 +94,8 @@ fn recursion_fibonacci() {
 }
 
 #[test]
-fn lists_are_dynamic_and_one_indexed() {
-    let source = "make main():\n    xs = [10, 20, 30]\n    print(xs[1])\n    append(xs, 40)\n    print(len(xs))\n    print(xs[4])\n";
+fn lists_are_dynamic_and_zero_indexed() {
+    let source = "make main():\n    xs = [10, 20, 30]\n    print(xs[0])\n    append(xs, 40)\n    print(len(xs))\n    print(xs[3])\n";
     let Some(stdout) = run_kite_program(source) else {
         return;
     };
@@ -159,7 +159,7 @@ fn structs_and_field_assignment() {
 
 #[test]
 fn tuples_and_dicts() {
-    let source = "make main():\n    p = (10, 20)\n    print(p[1])\n    print(p[2])\n    d = {\n        \"x\": 1,\n    }\n    print(d[\"x\"])\n";
+    let source = "make main():\n    p = (10, 20)\n    print(p[0])\n    print(p[1])\n    d = {\n        \"x\": 1,\n    }\n    print(d[\"x\"])\n";
     let Some(stdout) = run_kite_program(source) else {
         return;
     };
@@ -168,11 +168,12 @@ fn tuples_and_dicts() {
 
 #[test]
 fn for_range_and_for_each() {
-    let source = "make main():\n    for i = 1 to 3:\n        print(i)\n    xs = [7, 8, 9]\n    for x in xs:\n        print(x)\n";
+    // `for i = 0 to 3:` is half-open (Python's `range(0, 3)`): 0, 1, 2.
+    let source = "make main():\n    for i = 0 to 3:\n        print(i)\n    xs = [7, 8, 9]\n    for x in xs:\n        print(x)\n";
     let Some(stdout) = run_kite_program(source) else {
         return;
     };
-    assert_eq!(stdout, "1\n2\n3\n7\n8\n9\n");
+    assert_eq!(stdout, "0\n1\n2\n7\n8\n9\n");
 }
 
 #[test]
@@ -306,7 +307,7 @@ fn kite_lib_produces_object_and_header_callable_from_c() {
 
 #[test]
 fn char_at_and_substr_work() {
-    let source = "make main():\n    s = \"hello world\"\n    print(len(s))\n    print(char_at(s, 1))\n    print(substr(s, 1, 5))\n    print(substr(s, 7, 11))\n";
+    let source = "make main():\n    s = \"hello world\"\n    print(len(s))\n    print(char_at(s, 0))\n    print(substr(s, 0, 5))\n    print(substr(s, 6, 11))\n";
     let Some(stdout) = run_kite_program(source) else {
         return;
     };
@@ -315,7 +316,7 @@ fn char_at_and_substr_work() {
 
 #[test]
 fn substr_full_string_round_trips() {
-    let source = "make main():\n    s = \"kite\"\n    t = substr(s, 1, len(s))\n    print(t)\n    print(t == s)\n";
+    let source = "make main():\n    s = \"kite\"\n    t = substr(s, 0, len(s))\n    print(t)\n    print(t == s)\n";
     let Some(stdout) = run_kite_program(source) else {
         return;
     };
@@ -398,7 +399,7 @@ fn read_file_on_a_missing_path_yields_an_empty_string() {
 
 #[test]
 fn arg_count_and_arg_reflect_real_command_line_arguments() {
-    let source = "make main():\n    print(arg_count())\n    i = 1\n    until i > arg_count():\n        print(arg(i))\n        i = i + 1\n";
+    let source = "make main():\n    print(arg_count())\n    i = 0\n    while i < arg_count():\n        print(arg(i))\n        i = i + 1\n";
     let Some(stdout) = run_kite_program_with_args(source, &["foo", "bar", "baz"]) else {
         return;
     };

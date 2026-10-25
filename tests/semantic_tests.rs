@@ -113,17 +113,10 @@ fn unknown_struct_field_is_an_error() {
 }
 
 #[test]
-fn functions_cannot_take_struct_parameters() {
-    // Lists/tuples/dicts have no parameter type syntax at all (only
-    // scalar types and struct names are valid type annotations), so the
-    // grammar itself already rules those out; structs are the one
-    // aggregate type that *can* be written as a parameter annotation,
-    // and sema must still reject it.
-    let errors = check_err(
-        "type User:\n    name: string\n\nmake f(u: User):\n    return\n\nmake main():\n    return\n",
+fn functions_can_take_and_return_aggregates() {
+    check_ok(
+        "type User:\n    name: string\n\nmake f(u: User):\n    return\n\nmake g(xs: [int]) -> (int, int):\n    return (len(xs), 1)\n\nmake main():\n    return\n",
     );
-    assert!(errors.iter().any(|e| e.contains("may only take")));
-
     check_ok("make f(x: int) -> int:\n    return x\n\nmake main():\n    print(f(1))\n");
 }
 

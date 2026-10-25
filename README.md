@@ -22,7 +22,7 @@ Kite is:
 
 This repository is the reference compiler: `kite`, written in Rust.
 
-> **Status:** v0.1.3. This is a real, working compiler with a full
+> **Status:** v0.1.4 (in progress -- see checkpoint notes). This is a real, working compiler with a full
 > pipeline (lexer -> parser -> semantic analysis -> IR -> LLVM codegen ->
 > native executable) -- not a toy or a mockup. It also has real, documented
 > limitations, listed throughout this document as they come up.

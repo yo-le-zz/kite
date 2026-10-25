@@ -157,7 +157,18 @@ pub enum IrBinOp {
     GeF,
     EqStr,
     NeStr,
+    LtStr,
+    GtStr,
+    LeStr,
+    GeStr,
     ConcatStr,
+    /// `&`, `|`, `^`, `<<`, `>>` -- `int` operands only. `>>` is an
+    /// arithmetic (sign-extending) shift.
+    AndI,
+    OrI,
+    XorI,
+    ShlI,
+    ShrI,
 }
 
 /// The compile-time-known shape of an aggregate local, recorded at the
@@ -230,6 +241,12 @@ pub enum IrInstr {
     StrLen {
         dest: Temp,
         value: IrValue,
+    },
+    /// `str(x)` -- formats an `int`/`float`/`bool` into a fresh heap string.
+    ToStr {
+        dest: Temp,
+        value: IrValue,
+        src_ty: IrType,
     },
     /// `char_at(string, i)` -- byte value at a 1-based index.
     CharAt {
@@ -405,6 +422,79 @@ pub enum IrInstr {
     /// intrinsic type of its own in this representation).
     Return(Option<(IrValue, IrType)>),
     Unreachable,
+    /// A codegen no-op: the incoming pointer parameter named `name` *is*
+    /// the slot of aggregate local `name` (reference semantics: the callee
+    /// sees and mutates the caller's list/struct/tuple).
+    BindParam {
+        name: String,
+        ty: IrType,
+    },
+    /// `pop`/`remove`: removes element `index` (`None` = last) from the
+    /// list, shifting the tail down, and yields it in `dest`.
+    ListRemove {
+        dest: Temp,
+        base: String,
+        index: Option<IrValue>,
+        elem_ty: IrType,
+    },
+    /// `insert(xs, i, v)`: shifts the tail up and writes `value` at `index`.
+    ListInsert {
+        base: String,
+        index: IrValue,
+        value: IrValue,
+        elem_ty: IrType,
+    },
+    /// `clear(xs)`: sets the length to 0 (capacity is kept).
+    ListClear {
+        base: String,
+        elem_ty: IrType,
+    },
+    /// Defines local `name` as the struct pointed to by pointer local
+    /// `ptr_local` (auto-deref for `p.field` on a `ptr<Struct>`).
+    PtrAlias {
+        name: String,
+        ptr_local: String,
+        struct_ty: IrType,
+    },
+    /// Defines local `name` as a *pointer alias* to field `position` of
+    /// aggregate local `base` (so `append(obj.items, x)` mutates the real
+    /// field, not a copy).
+    FieldAlias {
+        name: String,
+        base: String,
+        layout_name: FieldBaseTy,
+        position: u32,
+        field_ty: IrType,
+    },
+    /// Defines local `name` as a pointer alias to element `index` of list
+    /// local `base` (bounds-checked).
+    ListElemAlias {
+        name: String,
+        base: String,
+        index: IrValue,
+        elem_ty: IrType,
+    },
+    /// `dest = bitcast src to to_ty` -- upcasts a subclass pointer.
+    PtrCast {
+        dest: Temp,
+        src: IrValue,
+        from_ty: IrType,
+        to_ty: IrType,
+    },
+    /// `return agg` -- copies the local aggregate `name` into the hidden
+    /// out-pointer (`sret`) and returns.
+    RetAgg {
+        name: String,
+        ty: IrType,
+    },
+    /// Calls a function that returns an aggregate, writing the result
+    /// into the already-`alloca`'d local `target`.
+    CallAgg {
+        target: String,
+        name: String,
+        args: Vec<(IrValue, IrType)>,
+        ret_ty: IrType,
+    },
     /// A codegen no-op: records that `name` now has aggregate `layout`,
     /// without performing any initialization itself (used when a plain
     /// value copy -- e.g. `b = a` aliasing -- already copied the data via
@@ -435,6 +525,10 @@ pub struct IrFunction {
     pub name: String,
     pub params: Vec<IrParam>,
     pub return_type: IrType,
+    /// `Some(T)` when the function returns an aggregate `T`: the LLVM
+    /// function then returns `void` and takes a hidden first parameter
+    /// `T* %__ret` that the callee fills in.
+    pub sret: Option<IrType>,
     pub body: Vec<IrInstr>,
 }
 
@@ -492,6 +586,30 @@ pub fn lower_program(program: &ast::Program) -> IrProgram {
         .collect();
     let sigs = resolve_return_types(program, sigs);
 
+    let ret_layouts: HashMap<String, AggLayout> = program
+        .functions
+        .iter()
+        .filter_map(|f| {
+            let rt = f.declared_return_type.as_ref()?;
+            matches!(
+                rt,
+                TypeName::List(_) | TypeName::Tuple(_) | TypeName::Dict(_) | TypeName::Struct(_)
+            )
+            .then(|| (f.name.clone(), layout_from_type_name(rt)))
+        })
+        .collect();
+
+    let param_tys: HashMap<String, Vec<IrType>> = program
+        .functions
+        .iter()
+        .map(|f| {
+            (
+                f.name.clone(),
+                f.params.iter().map(|p| IrType::from(&p.ty)).collect(),
+            )
+        })
+        .collect();
+
     let enum_table: HashMap<String, Vec<String>> = program
         .enums
         .iter()
@@ -516,7 +634,7 @@ pub fn lower_program(program: &ast::Program) -> IrProgram {
         .functions
         .iter()
         .filter(|f| !f.is_extern)
-        .map(|f| lower_function(f, &sigs, &struct_table, &enum_table))
+        .map(|f| lower_function(f, &sigs, &struct_table, &enum_table, &ret_layouts, &param_tys))
         .collect();
 
     let externs = program
@@ -593,6 +711,7 @@ fn find_first_return_type(block: &ast::Block, sigs: &HashMap<String, IrType>) ->
                 }
             }
             ast::Stmt::Until { body, .. }
+            | ast::Stmt::While { body, .. }
             | ast::Stmt::Infinit { body, .. }
             | ast::Stmt::ForRange { body, .. }
             | ast::Stmt::ForEach { body, .. }
@@ -636,7 +755,8 @@ fn quick_expr_type(expr: &ast::Expr, sigs: &HashMap<String, IrType>) -> Option<I
         ast::Expr::Unary { op: UnOp::Not, .. } => Some(IrType::Bool),
         ast::Expr::Unary { expr, .. } => quick_expr_type(expr, sigs),
         ast::Expr::Call { name, .. } if name == "len" || name == "char_at" => Some(IrType::I64),
-        ast::Expr::Call { name, .. } if name == "substr" => Some(IrType::Str),
+        ast::Expr::Call { name, .. } if name == "substr" || name == "str" => Some(IrType::Str),
+        ast::Expr::Call { name, .. } if matches!(name.as_str(), "pop" | "remove" | "insert" | "clear") => None,
         ast::Expr::Call { name, .. } if name == "read_file" || name == "arg" => Some(IrType::Str),
         ast::Expr::Call { name, .. } if name == "write_file" => Some(IrType::Bool),
         ast::Expr::Call { name, .. } if name == "arg_count" => Some(IrType::I64),
@@ -651,18 +771,84 @@ fn lower_function(
     sigs: &HashMap<String, IrType>,
     structs: &HashMap<String, Vec<(String, IrType)>>,
     enums: &HashMap<String, Vec<String>>,
+    ret_layouts: &HashMap<String, AggLayout>,
+    param_tys: &HashMap<String, Vec<IrType>>,
 ) -> IrFunction {
     let mut lowerer = FunctionLowerer::new(sigs.clone(), structs.clone(), enums.clone());
+    lowerer.ret_layouts = ret_layouts.clone();
+    lowerer.param_tys = param_tys.clone();
+    let return_type = sigs.get(&func.name).cloned().unwrap_or(IrType::Void);
+    let sret = if is_agg_ty(&return_type) {
+        Some(return_type.clone())
+    } else {
+        None
+    };
+    lowerer.sret = sret.clone();
+    lowerer.cur_ret = return_type.clone();
+    let mut ir_params = Vec::new();
     for param in &func.params {
         let ty = IrType::from(&param.ty);
-        lowerer.body.push(IrInstr::Alloca {
-            name: param.name.clone(),
-            ty: ty.clone(),
-        });
-        lowerer.body.push(IrInstr::Store {
-            name: param.name.clone(),
-            value: IrValue::Param(format!("{}.arg", param.name)),
-        });
+        if is_agg_ty(&ty) {
+            let layout = layout_from_type_name(&param.ty);
+            if block_rebinds(func.body.as_ref(), &param.name) {
+                // The body reassigns this name: work on a private copy so
+                // the caller's value is untouched.
+                lowerer.body.push(IrInstr::Alloca {
+                    name: param.name.clone(),
+                    ty: ty.clone(),
+                });
+                let dest = lowerer.fresh_temp();
+                lowerer.body.push(IrInstr::PtrLoad {
+                    dest,
+                    ptr: IrValue::Param(param.name.clone()),
+                    pointee_ty: ty.clone(),
+                });
+                lowerer.body.push(IrInstr::Store {
+                    name: param.name.clone(),
+                    value: IrValue::Temp(dest),
+                });
+                // `%name` is both the incoming pointer and the alloca'd
+                // slot: give the incoming one a distinct register.
+                ir_params.push(IrParam {
+                    name: format!("{}.in", param.name),
+                    ty: IrType::Ptr(Box::new(ty.clone())),
+                });
+                if let Some(IrInstr::PtrLoad { ptr, .. }) = lowerer
+                    .body
+                    .iter_mut()
+                    .rev()
+                    .find(|i| matches!(i, IrInstr::PtrLoad { .. }))
+                {
+                    *ptr = IrValue::Param(format!("{}.in", param.name));
+                }
+            } else {
+                lowerer.body.push(IrInstr::BindParam {
+                    name: param.name.clone(),
+                    ty: ty.clone(),
+                });
+                ir_params.push(IrParam {
+                    name: param.name.clone(),
+                    ty: IrType::Ptr(Box::new(ty.clone())),
+                });
+            }
+            lowerer.body.push(IrInstr::NoteLayout {
+                name: param.name.clone(),
+                layout,
+            });
+        } else {
+            lowerer.body.push(IrInstr::Alloca {
+                name: param.name.clone(),
+                ty: ty.clone(),
+            });
+            lowerer.body.push(IrInstr::Store {
+                name: param.name.clone(),
+                value: IrValue::Param(format!("{}.arg", param.name)),
+            });
+            ir_params.push(IrParam {
+                name: format!("{}.arg", param.name),
+                ty,
+            });
+        }
     }
     lowerer.lower_block(
         func.body
@@ -670,10 +856,9 @@ fn lower_function(
             .expect("non-extern function always has a body"),
     );
 
-    let return_type = sigs.get(&func.name).cloned().unwrap_or(IrType::Void);
     if !matches!(
         lowerer.body.last(),
-        Some(IrInstr::Return(_)) | Some(IrInstr::Unreachable)
+        Some(IrInstr::Return(_)) | Some(IrInstr::RetAgg { .. }) | Some(IrInstr::Unreachable)
     ) {
         if return_type == IrType::Void {
             lowerer.body.push(IrInstr::Return(None));
@@ -684,17 +869,81 @@ fn lower_function(
 
     IrFunction {
         name: func.name.clone(),
-        params: func
-            .params
-            .iter()
-            .map(|p| IrParam {
-                name: format!("{}.arg", p.name),
-                ty: IrType::from(&p.ty),
-            })
-            .collect(),
-        return_type,
+        params: ir_params,
+        return_type: if sret.is_some() {
+            IrType::Void
+        } else {
+            return_type
+        },
+        sret,
         body: lowerer.body,
     }
+}
+
+fn is_agg_ty(ty: &IrType) -> bool {
+    matches!(ty, IrType::List(_) | IrType::Tuple(_) | IrType::StructRef(_))
+}
+
+/// The aggregate layout implied by a source-level type.
+fn layout_from_type_name(ty: &TypeName) -> AggLayout {
+    match ty {
+        TypeName::List(elem) => AggLayout::List {
+            elem_ty: IrType::from(elem.as_ref()),
+        },
+        TypeName::Tuple(elems) => AggLayout::Tuple {
+            elem_tys: elems.iter().map(IrType::from).collect(),
+            keys: None,
+        },
+        TypeName::Dict(fields) => AggLayout::Tuple {
+            elem_tys: fields.iter().map(|(_, t)| IrType::from(t)).collect(),
+            keys: Some(fields.iter().map(|(k, _)| k.clone()).collect()),
+        },
+        TypeName::Struct(name) => AggLayout::Struct { name: name.clone() },
+        other => unreachable!("layout_from_type_name on non-aggregate `{other}`"),
+    }
+}
+
+/// True if `name` is ever the direct target of an assignment in `body`.
+fn block_rebinds(body: Option<&ast::Block>, name: &str) -> bool {
+    fn in_block(b: &ast::Block, name: &str) -> bool {
+        b.statements.iter().any(|s| in_stmt(s, name))
+    }
+    fn in_stmt(s: &ast::Stmt, name: &str) -> bool {
+        match s {
+            ast::Stmt::Assign {
+                target: ast::LValue::Ident(n),
+                ..
+            } => n == name,
+            ast::Stmt::If {
+                then_branch,
+                orif_branches,
+                else_branch,
+                ..
+            } => {
+                in_block(then_branch, name)
+                    || orif_branches.iter().any(|o| in_block(&o.body, name))
+                    || else_branch.as_ref().is_some_and(|b| in_block(b, name))
+            }
+            ast::Stmt::Until { body, .. }
+            | ast::Stmt::While { body, .. }
+            | ast::Stmt::Infinit { body, .. }
+            | ast::Stmt::ForRange { body, .. }
+            | ast::Stmt::ForEach { body, .. }
+            | ast::Stmt::Thread { body, .. } => in_block(body, name),
+            ast::Stmt::Try {
+                try_block,
+                failed_block,
+                finally_block,
+                ..
+            } => {
+                in_block(try_block, name)
+                    || failed_block.as_ref().is_some_and(|b| in_block(b, name))
+                    || finally_block.as_ref().is_some_and(|b| in_block(b, name))
+            }
+            _ => false,
+        }
+    }
+    body.is_some_and(|b| in_block(b, name))
 }
 
 struct LoopLabels {
@@ -717,6 +966,14 @@ struct FunctionLowerer {
     next_temp: Temp,
     next_label: u32,
     loop_stack: Vec<LoopLabels>,
+    /// Aggregate type returned by the function being lowered, if any.
+    sret: Option<IrType>,
+    /// Return type of the function being lowered (for `return null`).
+    cur_ret: IrType,
+    /// Parameter types per function (to upcast subclass arguments).
+    param_tys: HashMap<String, Vec<IrType>>,
+    /// Layout of the aggregate each aggregate-returning function yields.
+    ret_layouts: HashMap<String, AggLayout>,
     /// `finally` blocks of every `try` currently "in scope", outermost
     /// first -- see module docs.
     finally_stack: Vec<ast::Block>,
@@ -736,6 +993,10 @@ impl FunctionLowerer {
             next_temp: 0,
             next_label: 0,
             loop_stack: Vec::new(),
+            sret: None,
+            cur_ret: IrType::Void,
+            param_tys: HashMap::new(),
+            ret_layouts: HashMap::new(),
             finally_stack: Vec::new(),
         }
     }
@@ -761,7 +1022,10 @@ impl FunctionLowerer {
     fn is_terminated(&self) -> bool {
         matches!(
             self.body.last(),
-            Some(IrInstr::Return(_)) | Some(IrInstr::Unreachable) | Some(IrInstr::Jump(_))
+            Some(IrInstr::Return(_))
+                | Some(IrInstr::RetAgg { .. })
+                | Some(IrInstr::Unreachable)
+                | Some(IrInstr::Jump(_))
         )
     }
 
@@ -805,6 +1069,9 @@ impl FunctionLowerer {
 
     fn lower_stmt(&mut self, stmt: &ast::Stmt) {
         match stmt {
+            ast::Stmt::Unpack { .. } | ast::Stmt::Match { .. } => {
+                unreachable!("desugar removes `Unpack`/`Match` before IR lowering")
+            }
             ast::Stmt::Assign {
                 target,
                 annotated_type,
@@ -814,9 +1081,18 @@ impl FunctionLowerer {
             ast::Stmt::Expr(expr) => {
                 self.lower_expr(expr);
             }
+            ast::Stmt::Return {
+                value: Some(e), ..
+            } if self.sret.is_some() => {
+                let ty = self.sret.clone().unwrap();
+                let name = self.require_named_base(e);
+                self.replay_finally_from(0);
+                self.body.push(IrInstr::RetAgg { name, ty });
+            }
             ast::Stmt::Return { value, .. } => {
+                let cur_ret = self.cur_ret.clone();
                 let val = value.as_ref().map(|e| {
-                    let (v, ty) = self.lower_expr(e);
+                    let (v, ty) = self.lower_expr_expecting(e, Some(&cur_ret));
                     (self.materialize(v, &ty), ty)
                 });
                 self.replay_finally_from(0);
@@ -852,6 +1128,9 @@ impl FunctionLowerer {
             ast::Stmt::Until {
                 condition, body, ..
             } => self.lower_until(condition, body),
+            ast::Stmt::While {
+                condition, body, ..
+            } => self.lower_while(condition, body),
             ast::Stmt::Infinit { body, .. } => self.lower_infinit(body),
             ast::Stmt::ForRange {
                 var,
@@ -928,7 +1207,12 @@ impl FunctionLowerer {
             }
             ast::LValue::Field { base, field, .. } => {
                 let base_name = self.require_named_base(base);
-                let (val, field_ty) = self.lower_expr(value);
+                let declared_field_ty = if matches!(value, ast::Expr::NullLit(_)) {
+                    Some(self.field_info(&base_name, field).2)
+                } else {
+                    None
+                };
+                let (val, field_ty) = self.lower_expr_expecting(value, declared_field_ty.as_ref());
                 let layout = self.layout_of(&base_name);
                 let (layout_name, position) = self.resolve_field_position(&layout, field);
                 self.body.push(IrInstr::FieldSet {
@@ -992,11 +1276,42 @@ impl FunctionLowerer {
     fn is_aggregate_valued(&self, expr: &ast::Expr) -> bool {
         match expr {
             ast::Expr::ListLiteral(..)
+            | ast::Expr::EmptyList { .. }
             | ast::Expr::TupleLiteral(..)
             | ast::Expr::DictLiteral(..) => true,
             ast::Expr::Call { name, args, .. } => {
-                args.is_empty() && self.structs.contains_key(name)
+                (args.is_empty() && self.structs.contains_key(name))
+                    || self.ret_layouts.contains_key(name)
             }
+            ast::Expr::Field { base, field, .. } => {
+                let ast::Expr::Identifier(n, _) = &**base else {
+                    return false;
+                };
+                if !self.local_declared(n) {
+                    return false;
+                }
+                let sname = match self.infer_local_type(n) {
+                    IrType::StructRef(s) => s,
+                    IrType::Ptr(inner) => match *inner {
+                        IrType::StructRef(s) => s,
+                        _ => return false,
+                    },
+                    _ => return false,
+                };
+                self.structs
+                    .get(&sname)
+                    .and_then(|fs| fs.iter().find(|(f, _)| f == field))
+                    .is_some_and(|(_, t)| Self::layout_of_ir_type(t).is_some())
+            }
+            ast::Expr::Index { base, .. } => match &**base {
+                ast::Expr::Identifier(n, _) if self.local_declared(n) => matches!(
+                    self.layout_of(n),
+                    AggLayout::List {
+                        elem_ty: IrType::StructRef(_)
+                    }
+                ),
+                _ => false,
+            },
             ast::Expr::Identifier(name, _) => {
                 self.local_declared(name)
                     && matches!(
@@ -1104,6 +1419,18 @@ impl FunctionLowerer {
                     layout,
                 });
             }
+            ast::Expr::EmptyList { elem, .. } => {
+                let elem_ty = IrType::from(elem);
+                self.body.push(IrInstr::Alloca {
+                    name: target_name.to_string(),
+                    ty: IrType::List(Box::new(elem_ty.clone())),
+                });
+                self.body.push(IrInstr::ListInit {
+                    name: target_name.to_string(),
+                    elem_ty,
+                    values: Vec::new(),
+                });
+            }
             ast::Expr::ListLiteral(items, _) => {
                 let mut lowered = Vec::new();
                 let mut elem_ty = IrType::I64;
@@ -1166,6 +1493,48 @@ impl FunctionLowerer {
                     values: lowered,
                 });
             }
+            ast::Expr::Call { name, args, .. } if self.ret_layouts.contains_key(name) => {
+                self.lower_agg_call(target_name, name, args);
+            }
+            ast::Expr::Field { .. } => {
+                let alias = self.require_named_base(value);
+                let ty = self.infer_local_type(&alias);
+                let layout = self.layout_of(&alias);
+                if !self.local_declared(target_name) {
+                    self.body.push(IrInstr::Alloca {
+                        name: target_name.to_string(),
+                        ty,
+                    });
+                }
+                self.body.push(IrInstr::Store {
+                    name: target_name.to_string(),
+                    value: IrValue::Local(alias),
+                });
+                self.body.push(IrInstr::NoteLayout {
+                    name: target_name.to_string(),
+                    layout,
+                });
+            }
+            ast::Expr::Index { base, index, .. } => {
+                let (v, ty) = self.lower_index_get(base, index);
+                let IrType::StructRef(sname) = ty.clone() else {
+                    unreachable!("aggregate index element must be a struct")
+                };
+                if !self.local_declared(target_name) {
+                    self.body.push(IrInstr::Alloca {
+                        name: target_name.to_string(),
+                        ty,
+                    });
+                }
+                self.body.push(IrInstr::Store {
+                    name: target_name.to_string(),
+                    value: v,
+                });
+                self.body.push(IrInstr::NoteLayout {
+                    name: target_name.to_string(),
+                    layout: AggLayout::Struct { name: sname },
+                });
+            }
             ast::Expr::Call { name, .. } if self.structs.contains_key(name) => {
                 let fields = self.structs.get(name).cloned().unwrap_or_default();
                 let zero_values: Vec<IrValue> =
@@ -1186,12 +1555,172 @@ impl FunctionLowerer {
         }
     }
 
+    /// Lowers call arguments: aggregates are passed by address, scalars by
+    /// value.
+    fn lower_call_args(&mut self, fname: &str, args: &[ast::Expr]) -> Vec<(IrValue, IrType)> {
+        let mut out = Vec::new();
+        for (i, arg) in args.iter().enumerate() {
+            if self.is_aggregate_valued(arg) {
+                let nm = self.require_named_base(arg);
+                let ty = self.infer_local_type(&nm);
+                let dest = self.fresh_temp();
+                self.body.push(IrInstr::AddrOf { dest, name: nm });
+                let expected = self.param_tys.get(fname).and_then(|v| v.get(i)).cloned();
+                match expected {
+                    Some(exp) if exp != ty && is_agg_ty(&exp) => {
+                        let cast = self.fresh_temp();
+                        self.body.push(IrInstr::PtrCast {
+                            dest: cast,
+                            src: IrValue::Temp(dest),
+                            from_ty: ty,
+                            to_ty: exp.clone(),
+                        });
+                        out.push((IrValue::Temp(cast), IrType::Ptr(Box::new(exp))));
+                    }
+                    _ => out.push((IrValue::Temp(dest), IrType::Ptr(Box::new(ty)))),
+                }
+            } else {
+                let expected = self.param_tys.get(fname).and_then(|v| v.get(i)).cloned();
+                out.push(self.lower_expr_expecting(arg, expected.as_ref()));
+            }
+        }
+        out
+    }
+
+    /// `target = f(args)` where `f` returns an aggregate (via `sret`).
+    fn lower_agg_call(&mut self, target: &str, name: &str, args: &[ast::Expr]) {
+        let arg_vals = self.lower_call_args(name, args);
+        let ret_ty = self.sigs.get(name).cloned().unwrap_or(IrType::Void);
+        let layout = self.ret_layouts[name].clone();
+        if !self.local_declared(target) {
+            self.body.push(IrInstr::Alloca {
+                name: target.to_string(),
+                ty: ret_ty.clone(),
+            });
+        }
+        self.body.push(IrInstr::CallAgg {
+            target: target.to_string(),
+            name: name.to_string(),
+            args: arg_vals,
+            ret_ty,
+        });
+        self.body.push(IrInstr::NoteLayout {
+            name: target.to_string(),
+            layout,
+        });
+    }
+
     /// Returns the name of a local already holding an aggregate, lowering
     /// `expr` into a fresh synthetic local first if it isn't already a
     /// plain variable reference (e.g. an inline `[1, 2, 3][1]`).
+    fn field_info(&self, base_name: &str, field: &str) -> (FieldBaseTy, u32, IrType) {
+        let layout = self.layout_of(base_name);
+        let (layout_name, position) = self.resolve_field_position(&layout, field);
+        let field_ty = match &layout_name {
+            FieldBaseTy::Struct(name) => self
+                .structs
+                .get(name)
+                .and_then(|f| f.get(position as usize))
+                .map(|(_, t)| t.clone())
+                .unwrap_or(IrType::I64),
+            FieldBaseTy::Tuple(tys) => tys.get(position as usize).cloned().unwrap_or(IrType::I64),
+        };
+        (layout_name, position, field_ty)
+    }
+
+    fn layout_of_ir_type(ty: &IrType) -> Option<AggLayout> {
+        match ty {
+            IrType::List(elem) => Some(AggLayout::List {
+                elem_ty: (**elem).clone(),
+            }),
+            IrType::StructRef(n) => Some(AggLayout::Struct { name: n.clone() }),
+            _ => None,
+        }
+    }
+
+    /// If local `name` holds a `ptr<Struct>`, returns an alias local that
+    /// *is* the pointed-to struct; otherwise `name` itself.
+    fn deref_if_struct_ptr(&mut self, name: String) -> String {
+        if !self.local_declared(&name) {
+            return name;
+        }
+        if let IrType::Ptr(inner) = self.infer_local_type(&name) {
+            if let IrType::StructRef(sname) = *inner {
+                let alias = self.fresh_name("deref");
+                self.body.push(IrInstr::PtrAlias {
+                    name: alias.clone(),
+                    ptr_local: name,
+                    struct_ty: IrType::StructRef(sname.clone()),
+                });
+                self.body.push(IrInstr::NoteLayout {
+                    name: alias.clone(),
+                    layout: AggLayout::Struct { name: sname },
+                });
+                return alias;
+            }
+        }
+        name
+    }
+
     fn require_named_base(&mut self, expr: &ast::Expr) -> String {
         if let ast::Expr::Identifier(name, _) = expr {
-            name.clone()
+            self.deref_if_struct_ptr(name.clone())
+        } else if let ast::Expr::Field { base, field, .. } = expr {
+            // Aggregate-typed field: alias the real slot.
+            let base_name = self.require_named_base(base);
+            let (layout_name, position, field_ty) = self.field_info(&base_name, field);
+            if let Some(layout) = Self::layout_of_ir_type(&field_ty) {
+                let alias = self.fresh_name("fld");
+                self.body.push(IrInstr::FieldAlias {
+                    name: alias.clone(),
+                    base: base_name,
+                    layout_name,
+                    position,
+                    field_ty,
+                });
+                self.body.push(IrInstr::NoteLayout {
+                    name: alias.clone(),
+                    layout,
+                });
+                alias
+            } else if matches!(&field_ty, IrType::Ptr(inner) if matches!(**inner, IrType::StructRef(_)))
+            {
+                let slot = self.fresh_name("fld");
+                self.body.push(IrInstr::FieldAlias {
+                    name: slot.clone(),
+                    base: base_name,
+                    layout_name,
+                    position,
+                    field_ty,
+                });
+                self.deref_if_struct_ptr(slot)
+            } else {
+                let name = self.fresh_name("agg");
+                self.lower_aggregate_into(expr, &name);
+                name
+            }
+        } else if let ast::Expr::Index { base, index, .. } = expr {
+            let base_name = self.require_named_base(base);
+            if let AggLayout::List { elem_ty } = self.layout_of(&base_name) {
+                if let Some(layout) = Self::layout_of_ir_type(&elem_ty) {
+                    let (idx, _) = self.lower_expr(index);
+                    let alias = self.fresh_name("elem");
+                    self.body.push(IrInstr::ListElemAlias {
+                        name: alias.clone(),
+                        base: base_name,
+                        index: idx,
+                        elem_ty,
+                    });
+                    self.body.push(IrInstr::NoteLayout {
+                        name: alias.clone(),
+                        layout,
+                    });
+                    return alias;
+                }
+            }
+            let name = self.fresh_name("agg");
+            self.lower_aggregate_into(expr, &name);
+            name
         } else {
             let name = self.fresh_name("agg");
             self.lower_aggregate_into(expr, &name);
@@ -1202,7 +1731,14 @@ impl FunctionLowerer {
     fn local_declared(&self, name: &str) -> bool {
         self.body
             .iter()
-            .any(|i| matches!(i, IrInstr::Alloca { name: n, .. } if n == name))
+            .any(|i| {
+                matches!(i,
+                    IrInstr::Alloca { name: n, .. }
+                    | IrInstr::BindParam { name: n, .. }
+                    | IrInstr::FieldAlias { name: n, .. }
+                    | IrInstr::ListElemAlias { name: n, .. }
+                    | IrInstr::PtrAlias { name: n, .. } if n == name)
+            })
     }
 
     /// Recovers the aggregate layout most recently established for
@@ -1238,7 +1774,7 @@ impl FunctionLowerer {
             AggLayout::Tuple { elem_tys, keys } => {
                 let pos = match keys {
                     Some(keys) => keys.iter().position(|k| k == field).unwrap_or(0) as u32,
-                    None => field.parse::<u32>().unwrap_or(1).saturating_sub(1),
+                    None => field.parse::<u32>().unwrap_or(0),
                 };
                 (FieldBaseTy::Tuple(elem_tys.clone()), pos)
             }
@@ -1253,7 +1789,20 @@ impl FunctionLowerer {
             .iter()
             .rev()
             .find_map(|instr| match instr {
-                IrInstr::Alloca { name: n, ty } if n == name => Some(ty.clone()),
+                IrInstr::Alloca { name: n, ty } | IrInstr::BindParam { name: n, ty }
+                    if n == name =>
+                {
+                    Some(ty.clone())
+                }
+                IrInstr::FieldAlias { name: n, field_ty, .. } if n == name => {
+                    Some(field_ty.clone())
+                }
+                IrInstr::ListElemAlias { name: n, elem_ty, .. } if n == name => {
+                    Some(elem_ty.clone())
+                }
+                IrInstr::PtrAlias { name: n, struct_ty, .. } if n == name => {
+                    Some(struct_ty.clone())
+                }
                 _ => None,
             })
             .unwrap_or(IrType::I64)
@@ -1324,20 +1873,44 @@ impl FunctionLowerer {
     }
 
     fn lower_until(&mut self, condition: &ast::Expr, body: &ast::Block) {
-        let cond_label = self.fresh_label("until.cond");
-        let body_label = self.fresh_label("until.body");
-        let end_label = self.fresh_label("until.end");
+        self.lower_conditional_loop(condition, body, true, "until")
+    }
+
+    fn lower_while(&mut self, condition: &ast::Expr, body: &ast::Block) {
+        self.lower_conditional_loop(condition, body, false, "while")
+    }
+
+    /// Shared machinery for `until`/`while`: identical loop shape, the
+    /// only difference is which direction of the condition sends
+    /// control into the body. `invert_for_body` is `true` for `until`
+    /// (loop while `condition` is false) and `false` for `while` (loop
+    /// while `condition` is true, the familiar direction).
+    fn lower_conditional_loop(
+        &mut self,
+        condition: &ast::Expr,
+        body: &ast::Block,
+        invert_for_body: bool,
+        label_hint: &str,
+    ) {
+        let cond_label = self.fresh_label(&format!("{label_hint}.cond"));
+        let body_label = self.fresh_label(&format!("{label_hint}.body"));
+        let end_label = self.fresh_label(&format!("{label_hint}.end"));
 
         self.body.push(IrInstr::Jump(cond_label.clone()));
         self.body.push(IrInstr::Label(cond_label.clone()));
         let (cond_val, _) = self.lower_expr(condition);
-        let negated = self.fresh_temp();
-        self.body.push(IrInstr::Not {
-            dest: negated,
-            value: cond_val,
-        });
+        let branch_val = if invert_for_body {
+            let negated = self.fresh_temp();
+            self.body.push(IrInstr::Not {
+                dest: negated,
+                value: cond_val,
+            });
+            IrValue::Temp(negated)
+        } else {
+            cond_val
+        };
         self.body.push(IrInstr::Branch {
-            cond: IrValue::Temp(negated),
+            cond: branch_val,
             then_label: body_label.clone(),
             else_label: end_label.clone(),
         });
@@ -1415,7 +1988,8 @@ impl FunctionLowerer {
         let var_reg = self.fresh_temp();
         self.body.push(IrInstr::BinOp {
             dest: var_reg,
-            op: IrBinOp::LeI,
+            // Half-open, matching Python's `range(start, end)`.
+            op: IrBinOp::LtI,
             lhs: IrValue::Local(var.to_string()),
             rhs: IrValue::Local(end_name),
         });
@@ -1468,7 +2042,7 @@ impl FunctionLowerer {
         });
         self.body.push(IrInstr::Store {
             name: idx_name.clone(),
-            value: IrValue::ConstInt(1),
+            value: IrValue::ConstInt(0),
         });
 
         // Snapshot the length once up front (Python-like: mutating the
@@ -1498,7 +2072,7 @@ impl FunctionLowerer {
         let cmp = self.fresh_temp();
         self.body.push(IrInstr::BinOp {
             dest: cmp,
-            op: IrBinOp::LeI,
+            op: IrBinOp::LtI,
             lhs: IrValue::Local(idx_name.clone()),
             rhs: IrValue::Local(len_name),
         });
@@ -1516,14 +2090,24 @@ impl FunctionLowerer {
             index: IrValue::Local(idx_name.clone()),
             elem_ty: elem_ty.clone(),
         });
-        self.body.push(IrInstr::Alloca {
-            name: var.to_string(),
-            ty: elem_ty,
-        });
+        if !self.local_declared(var) {
+            self.body.push(IrInstr::Alloca {
+                name: var.to_string(),
+                ty: elem_ty.clone(),
+            });
+        }
         self.body.push(IrInstr::Store {
             name: var.to_string(),
             value: IrValue::Temp(elem_reg),
         });
+        if let IrType::StructRef(sname) = &elem_ty {
+            self.body.push(IrInstr::NoteLayout {
+                name: var.to_string(),
+                layout: AggLayout::Struct {
+                    name: sname.clone(),
+                },
+            });
+        }
 
         self.loop_stack.push(LoopLabels {
             continue_label: step_label.clone(),
@@ -1581,6 +2165,14 @@ impl FunctionLowerer {
 
     fn lower_expr_inner(&mut self, expr: &ast::Expr) -> (IrValue, IrType) {
         match expr {
+            ast::Expr::Named { .. } => unreachable!("desugar removes `Named` before IR lowering"),
+            ast::Expr::MethodCall { .. } => unreachable!("sema rejects unresolved method calls"),
+            ast::Expr::EmptyList { .. } => {
+                let tmp = self.fresh_name("agg");
+                self.lower_aggregate_into(expr, &tmp);
+                let ty = self.infer_local_type(&tmp);
+                (IrValue::Local(tmp), ty)
+            }
             ast::Expr::IntLiteral(v, _) => (IrValue::ConstInt(*v), IrType::I64),
             ast::Expr::FloatLiteral(v, _) => (IrValue::ConstFloat(*v), IrType::F64),
             ast::Expr::BoolLiteral(v, _) => (IrValue::ConstBool(*v), IrType::Bool),
@@ -1728,6 +2320,15 @@ impl FunctionLowerer {
                 self.body.push(IrInstr::Not { dest, value: val });
                 (IrValue::Temp(dest), IrType::Bool)
             }
+            UnOp::BitNot => {
+                self.body.push(IrInstr::BinOp {
+                    dest,
+                    op: IrBinOp::XorI,
+                    lhs: val,
+                    rhs: IrValue::ConstInt(-1),
+                });
+                (IrValue::Temp(dest), IrType::I64)
+            }
             UnOp::Deref => {
                 let pointee_ty = match ty {
                     IrType::Ptr(inner) => *inner,
@@ -1870,21 +2471,50 @@ impl FunctionLowerer {
                 IrType::Bool,
             ),
             BinOp::Lt => (
-                if is_float { IrBinOp::LtF } else { IrBinOp::LtI },
+                if is_str {
+                    IrBinOp::LtStr
+                } else if is_float {
+                    IrBinOp::LtF
+                } else {
+                    IrBinOp::LtI
+                },
                 IrType::Bool,
             ),
             BinOp::Gt => (
-                if is_float { IrBinOp::GtF } else { IrBinOp::GtI },
+                if is_str {
+                    IrBinOp::GtStr
+                } else if is_float {
+                    IrBinOp::GtF
+                } else {
+                    IrBinOp::GtI
+                },
                 IrType::Bool,
             ),
             BinOp::LtEq => (
-                if is_float { IrBinOp::LeF } else { IrBinOp::LeI },
+                if is_str {
+                    IrBinOp::LeStr
+                } else if is_float {
+                    IrBinOp::LeF
+                } else {
+                    IrBinOp::LeI
+                },
                 IrType::Bool,
             ),
             BinOp::GtEq => (
-                if is_float { IrBinOp::GeF } else { IrBinOp::GeI },
+                if is_str {
+                    IrBinOp::GeStr
+                } else if is_float {
+                    IrBinOp::GeF
+                } else {
+                    IrBinOp::GeI
+                },
                 IrType::Bool,
             ),
+            BinOp::BitAnd => (IrBinOp::AndI, IrType::I64),
+            BinOp::BitOr => (IrBinOp::OrI, IrType::I64),
+            BinOp::BitXor => (IrBinOp::XorI, IrType::I64),
+            BinOp::Shl => (IrBinOp::ShlI, IrType::I64),
+            BinOp::Shr => (IrBinOp::ShrI, IrType::I64),
             BinOp::And | BinOp::Or => unreachable!("handled above"),
         };
 
@@ -1962,6 +2592,49 @@ impl FunctionLowerer {
             return (IrValue::ConstInt(0), IrType::Void);
         }
 
+        if matches!(name, "pop" | "clear" | "remove" | "insert") {
+            let base_name = self.require_named_base(&args[0]);
+            let elem_ty = match self.layout_of(&base_name) {
+                AggLayout::List { elem_ty } => elem_ty,
+                _ => IrType::I64,
+            };
+            match name {
+                "clear" => {
+                    self.body.push(IrInstr::ListClear {
+                        base: base_name,
+                        elem_ty,
+                    });
+                    return (IrValue::ConstInt(0), IrType::Void);
+                }
+                "insert" => {
+                    let (idx, _) = self.lower_expr(&args[1]);
+                    let (val, _) = self.lower_expr(&args[2]);
+                    self.body.push(IrInstr::ListInsert {
+                        base: base_name,
+                        index: idx,
+                        value: val,
+                        elem_ty,
+                    });
+                    return (IrValue::ConstInt(0), IrType::Void);
+                }
+                _ => {
+                    let index = if name == "remove" {
+                        Some(self.lower_expr(&args[1]).0)
+                    } else {
+                        None
+                    };
+                    let dest = self.fresh_temp();
+                    self.body.push(IrInstr::ListRemove {
+                        dest,
+                        base: base_name,
+                        index,
+                        elem_ty: elem_ty.clone(),
+                    });
+                    return (IrValue::Temp(dest), elem_ty);
+                }
+            }
+        }
+
         if name == "append" {
             let base_name = self.require_named_base(&args[0]);
             let elem_ty = match self.layout_of(&base_name) {
@@ -1978,6 +2651,15 @@ impl FunctionLowerer {
         }
 
         if name == "len" {
+            if !matches!(&args[0], ast::Expr::Identifier(..)) && self.is_aggregate_valued(&args[0])
+            {
+                let base = self.require_named_base(&args[0]);
+                if matches!(self.layout_of(&base), AggLayout::List { .. }) {
+                    let dest = self.fresh_temp();
+                    self.body.push(IrInstr::ListLen { dest, base });
+                    return (IrValue::Temp(dest), IrType::I64);
+                }
+            }
             let (val, ty) = self.lower_expr(&args[0]);
             let dest = self.fresh_temp();
             match (&val, &ty) {
@@ -1992,6 +2674,20 @@ impl FunctionLowerer {
                 }
             }
             return (IrValue::Temp(dest), IrType::I64);
+        }
+
+        if name == "str" {
+            let (v, ty) = self.lower_expr(&args[0]);
+            if ty == IrType::Str {
+                return (v, IrType::Str);
+            }
+            let dest = self.fresh_temp();
+            self.body.push(IrInstr::ToStr {
+                dest,
+                value: v,
+                src_ty: ty,
+            });
+            return (IrValue::Temp(dest), IrType::Str);
         }
 
         if name == "char_at" {
@@ -2064,10 +2760,15 @@ impl FunctionLowerer {
             return (IrValue::ConstInt(0), IrType::Void);
         }
 
-        let mut arg_vals = Vec::new();
-        for arg in args {
-            arg_vals.push(self.lower_expr(arg));
+        if self.ret_layouts.contains_key(name) {
+            // Aggregate result used in a non-aggregate context (e.g. a
+            // bare statement `f()`): materialize into a throwaway local.
+            let tmp = self.fresh_name("agg");
+            self.lower_agg_call(&tmp, name, args);
+            let ty = self.infer_local_type(&tmp);
+            return (IrValue::Local(tmp), ty);
         }
+        let arg_vals = self.lower_call_args(name, args);
         let ret_ty = self.sigs.get(name).cloned().unwrap_or(IrType::Void);
         if ret_ty == IrType::Void {
             self.body.push(IrInstr::Call {

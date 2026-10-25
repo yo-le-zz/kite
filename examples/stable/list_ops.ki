@@ -1,0 +1,14 @@
+make main():
+    xs = [10, 20, 30, 40]
+    print(pop(xs))
+    print(remove(xs, 0))
+    insert(xs, 1, 99)
+    for x in xs:
+        print(x)
+    clear(xs)
+    print(len(xs))
+    append(xs, 5)
+    print(xs[0])
+    ss = ["a", "b", "c"]
+    print(remove(ss, 1))
+    print(len(ss))

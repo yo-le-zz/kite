@@ -20,6 +20,6 @@ make name(l: Light) -> string:
 
 make main():
     light = Light.Red
-    for i = 1 to 6:
+    for i = 0 to 6:
         print(name(light))
         light = next(light)

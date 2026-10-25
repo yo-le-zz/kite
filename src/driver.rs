@@ -62,10 +62,15 @@ pub fn check_source(filename: &str, source: &str) -> (CheckOutcome, Option<ir::I
 
     let (program, parse_diags) = parser::parse(tokens);
     let had_parse_errors = report_and_check(filename, source, &parse_diags);
-    let Some(program) = program else {
+    let Some(mut program) = program else {
         return (CheckOutcome::Errors, None);
     };
     if had_parse_errors {
+        return (CheckOutcome::Errors, None);
+    }
+    crate::prelude::inject(&mut program);
+    let desugar_diags = crate::desugar::desugar_program(&mut program);
+    if report_and_check(filename, source, &desugar_diags) {
         return (CheckOutcome::Errors, None);
     }
 
@@ -114,9 +119,20 @@ fn check_project_impl(
     src_root: &Path,
     freestanding: bool,
 ) -> (CheckOutcome, Option<(ast::Program, ir::IrProgram)>) {
-    let Some(merged) = resolve::load_and_merge(entry_path, src_root) else {
+    let Some(mut merged) = resolve::load_and_merge(entry_path, src_root) else {
         return (CheckOutcome::Errors, None);
     };
+    {
+        crate::prelude::inject(&mut merged.program);
+        let desugar_diags = crate::desugar::desugar_program(&mut merged.program);
+        if !desugar_diags.is_empty() {
+            let entry_source = std::fs::read_to_string(entry_path).unwrap_or_default();
+            desugar_diags.emit(&entry_path.display().to_string(), &entry_source);
+            if desugar_diags.had_errors() {
+                return (CheckOutcome::Errors, None);
+            }
+        }
+    }
 
     let (typed, sema_diags) = if freestanding {
         sema::analyze_multi_file_freestanding(&merged.program, &merged.origins)

@@ -1,0 +1,34 @@
+enum Expr:
+    Num(v: int)
+    Add(l: ptr<Expr>, r: ptr<Expr>)
+    Mul(l: ptr<Expr>, r: ptr<Expr>)
+
+make num(v: int) -> ptr<Expr>:
+    p = alloc(Expr)
+    *p = Expr.Num(v)
+    return p
+
+make add(a: ptr<Expr>, b: ptr<Expr>) -> ptr<Expr>:
+    p = alloc(Expr)
+    *p = Expr.Add(a, b)
+    return p
+
+make mul(a: ptr<Expr>, b: ptr<Expr>) -> ptr<Expr>:
+    p = alloc(Expr)
+    *p = Expr.Mul(a, b)
+    return p
+
+make eval(e: ptr<Expr>) -> int:
+    x = *e
+    match x:
+        case Num(v):
+            return v
+        case Add(l, r):
+            return eval(l) + eval(r)
+        case Mul(l, r):
+            return eval(l) * eval(r)
+    return 0
+
+make main():
+    t = add(num(2), mul(num(3), num(4)))
+    print(eval(t))

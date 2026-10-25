@@ -1,7 +1,7 @@
-// Lists are 1-indexed and growable.
+// Lists are 0-indexed and growable.
 make main():
     numbers = [10, 20, 30]
-    print(numbers[1])
+    print(numbers[0])
 
     append(numbers, 40)
     print(len(numbers))
@@ -12,5 +12,5 @@ make main():
     print(total)
 
     point = (10, 20)
+    print(point[0])
     print(point[1])
-    print(point[2])

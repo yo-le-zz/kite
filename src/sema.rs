@@ -211,6 +211,14 @@ impl<'a> Analyzer<'a> {
 
     fn check_stmt(&mut self, stmt: &Stmt) -> bool {
         match stmt {
+            Stmt::Unpack { span, .. } => {
+                self.error("E0101", "internal: unpacking was not desugared", *span);
+                false
+            }
+            Stmt::Match { span, .. } => {
+                self.error("E0107", "internal: `match` was not desugared", *span);
+                false
+            }
             Stmt::Assign {
                 target,
                 annotated_type,
@@ -270,6 +278,9 @@ impl<'a> Analyzer<'a> {
                 any_branch_falls_through
             }
             Stmt::Until {
+                condition, body, ..
+            }
+            | Stmt::While {
                 condition, body, ..
             } => {
                 let ty = self.check_expr(condition);
@@ -418,8 +429,13 @@ impl<'a> Analyzer<'a> {
                 }
             }
             LValue::Field { base, field, span } => {
-                let value_ty = self.check_expr(value);
                 let base_ty = self.check_expr(base);
+                let expected_field = if matches!(value, Expr::NullLit(_)) {
+                    self.resolve_field_quiet(&base_ty, field)
+                } else {
+                    None
+                };
+                let value_ty = self.check_expr_expecting(value, expected_field.as_ref());
                 if matches!(
                     base.as_ref(),
                     Expr::Unary {
@@ -512,6 +528,23 @@ impl<'a> Analyzer<'a> {
     /// or already-declared assignment target, or the other side of a
     /// `==`/`!=` comparison) instead of always erroring on it. Every
     /// other expression kind behaves exactly like `check_expr`.
+    /// Field type of a struct-typed expression, without reporting errors.
+    fn resolve_field_quiet(&self, base_ty: &TypeName, field: &str) -> Option<TypeName> {
+        let base_ty = match base_ty {
+            TypeName::Ptr(inner) => &**inner,
+            other => other,
+        };
+        let TypeName::Struct(n) = base_ty else {
+            return None;
+        };
+        self.tables
+            .structs
+            .get(n)?
+            .iter()
+            .find(|(f, _)| f == field)
+            .map(|(_, t)| t.clone())
+    }
+
     fn check_expr_expecting(&mut self, expr: &Expr, expected: Option<&TypeName>) -> TypeName {
         if let Expr::NullLit(span) = expr {
             return match expected {
@@ -534,7 +567,10 @@ impl<'a> Analyzer<'a> {
     }
 
     fn check_return(&mut self, value: Option<&Expr>, span: Span) {
-        let actual = value.map(|e| self.check_expr(e)).unwrap_or(TypeName::Void);
+        let expected_ret = self.current_return_type.clone();
+        let actual = value
+            .map(|e| self.check_expr_expecting(e, expected_ret.as_ref()))
+            .unwrap_or(TypeName::Void);
         match self.current_return_type.clone() {
             Some(expected) => {
                 if actual != expected {
@@ -553,7 +589,7 @@ impl<'a> Analyzer<'a> {
                 // `return` statement gets a chance to establish the type.
                 if self.is_unresolved_marker(value) {
                     self.return_inference_blocked = true;
-                } else if !is_first_class_value(&actual) {
+                } else if !is_returnable(&actual) {
                     self.error(
                         "E0039",
                         format!(
@@ -591,8 +627,38 @@ impl<'a> Analyzer<'a> {
         }
     }
 
+    /// `sub` can stand in for `sup` when both are structs and `sub`'s
+    /// fields begin with all of `sup`'s (class inheritance flattens base
+    /// fields first, so a `Dog*` is a valid `Animal*`).
+    fn is_subtype(&self, sub: &TypeName, sup: &TypeName) -> bool {
+        let (TypeName::Struct(a), TypeName::Struct(b)) = (sub, sup) else {
+            return false;
+        };
+        let (Some(fa), Some(fb)) = (self.tables.structs.get(a), self.tables.structs.get(b)) else {
+            return false;
+        };
+        !fb.is_empty() && fa.len() >= fb.len() && fa.iter().zip(fb.iter()).all(|(x, y)| x == y)
+    }
+
     fn check_expr(&mut self, expr: &Expr) -> TypeName {
         match expr {
+            Expr::MethodCall { name, span, .. } => {
+                self.error(
+                    "E0103",
+                    format!("cannot resolve method `{name}`: the receiver's class is unknown here"),
+                    *span,
+                );
+                TypeName::Void
+            }
+            Expr::EmptyList { elem, .. } => TypeName::List(Box::new(elem.clone())),
+            Expr::Named { value, span, .. } => {
+                self.error(
+                    "E0102",
+                    "named arguments are only allowed in calls to Kite functions",
+                    *span,
+                );
+                self.check_expr(value)
+            }
             Expr::IntLiteral(..) => TypeName::Int,
             Expr::FloatLiteral(..) => TypeName::Float,
             Expr::BoolLiteral(..) => TypeName::Bool,
@@ -730,7 +796,7 @@ impl<'a> Analyzer<'a> {
             return TypeName::List(Box::new(TypeName::Int));
         }
         let first_ty = self.check_expr(&items[0]);
-        if !is_scalar(&first_ty) {
+        if !is_scalar(&first_ty) && !matches!(first_ty, TypeName::Struct(_)) {
             self.error(
                 "E0047b",
                 format!("list elements must be `int`, `float`, `bool`, or `string` in Kite v0.1, found `{first_ty}` (nested collections are planned for v0.2)"),
@@ -791,20 +857,20 @@ impl<'a> Analyzer<'a> {
             // Lists are dynamically sized (see `TypeName::List`), so
             // out-of-range indices can't be ruled out at compile time even
             // for a literal index; codegen always emits a runtime bounds
-            // check (Kite lists are 1-indexed: valid indices are
-            // `1..=len(list)`).
+            // check (Kite lists are 0-indexed: valid indices are
+            // `0..len(list)`).
             TypeName::List(elem) => Some((**elem).clone()),
             TypeName::Tuple(elems) => match index {
                 Expr::IntLiteral(v, ispan) => {
-                    if *v < 1 || *v as usize > elems.len() {
+                    if *v < 0 || *v as usize >= elems.len() {
                         self.error(
                                 "E0051",
-                                format!("index {v} is out of range for a tuple of size {} (tuples are 1-indexed)", elems.len()),
+                                format!("index {v} is out of range for a tuple of size {} (tuples are 0-indexed)", elems.len()),
                                 *ispan,
                             );
                         None
                     } else {
-                        Some(elems[*v as usize - 1].clone())
+                        Some(elems[*v as usize].clone())
                     }
                 }
                 _ => {
@@ -841,6 +907,13 @@ impl<'a> Analyzer<'a> {
     }
 
     fn resolve_field(&mut self, base_ty: &TypeName, field: &str, span: Span) -> Option<TypeName> {
+        // `p.field` through a `ptr<Struct>` auto-dereferences.
+        if let TypeName::Ptr(inner) = base_ty {
+            if matches!(**inner, TypeName::Struct(_)) {
+                let inner = (**inner).clone();
+                return self.resolve_field(&inner, field, span);
+            }
+        }
         match base_ty {
             TypeName::Struct(name) => match self.tables.structs.get(name) {
                 Some(fields) => match fields.iter().find(|(f, _)| f == field) {
@@ -928,6 +1001,16 @@ impl<'a> Analyzer<'a> {
                     );
                 }
                 TypeName::Bool
+            }
+            UnOp::BitNot => {
+                if ty != TypeName::Int {
+                    self.error(
+                        "E0101",
+                        format!("cannot apply `~` to a value of type `{ty}` -- `int` only"),
+                        span,
+                    );
+                }
+                TypeName::Int
             }
             UnOp::Deref => match ty {
                 TypeName::Ptr(inner) => *inner,
@@ -1022,7 +1105,9 @@ impl<'a> Analyzer<'a> {
                 }
             }
             Lt | Gt | LtEq | GtEq => {
-                if lty != rty || (lty != TypeName::Int && lty != TypeName::Float) {
+                if lty != rty
+                    || (lty != TypeName::Int && lty != TypeName::Float && lty != TypeName::String)
+                {
                     self.error(
                         "E0028",
                         format!(
@@ -1035,6 +1120,19 @@ impl<'a> Analyzer<'a> {
                 TypeName::Bool
             }
             Eq | NotEq => unreachable!("handled above"),
+            BitAnd | BitOr | BitXor | Shl | Shr => {
+                if lty != TypeName::Int || rty != TypeName::Int {
+                    self.error(
+                        "E0101",
+                        format!(
+                            "cannot apply `{}` to `{lty}` and `{rty}` -- `int` only",
+                            op_symbol(op)
+                        ),
+                        span,
+                    );
+                }
+                TypeName::Int
+            }
             And | Or => {
                 if lty != TypeName::Bool || rty != TypeName::Bool {
                     self.error(
@@ -1064,6 +1162,55 @@ impl<'a> Analyzer<'a> {
                 self.check_expr(arg);
             }
             return TypeName::Void;
+        }
+
+        if matches!(name, "pop" | "clear" | "remove" | "insert") {
+            let want = match name {
+                "pop" | "clear" => 1,
+                "remove" => 2,
+                _ => 3,
+            };
+            if args.len() != want {
+                self.error(
+                    "E0110",
+                    format!("`{name}` takes exactly {want} argument(s), found {}", args.len()),
+                    span,
+                );
+                for a in args {
+                    self.check_expr(a);
+                }
+                return TypeName::Void;
+            }
+            let list_ty = self.check_expr(&args[0]);
+            let TypeName::List(elem) = &list_ty else {
+                self.error(
+                    "E0064",
+                    format!("`{name}` expects a list as its first argument, found `{list_ty}`"),
+                    args[0].span(),
+                );
+                return TypeName::Void;
+            };
+            let elem = (**elem).clone();
+            if want >= 2 {
+                let it = self.check_expr(&args[1]);
+                if it != TypeName::Int {
+                    self.error("E0111", format!("list index must be `int`, found `{it}`"), args[1].span());
+                }
+            }
+            if name == "insert" {
+                let vt = self.check_expr(&args[2]);
+                if vt != elem {
+                    self.error(
+                        "E0063",
+                        format!("cannot insert a `{vt}` into a list of `{elem}`"),
+                        args[2].span(),
+                    );
+                }
+            }
+            return match name {
+                "pop" | "remove" => elem,
+                _ => TypeName::Void,
+            };
         }
 
         if name == "append" {
@@ -1123,6 +1270,30 @@ impl<'a> Analyzer<'a> {
                 }
             }
             return TypeName::Int;
+        }
+
+        if name == "str" {
+            if args.len() != 1 {
+                self.error(
+                    "E0090",
+                    format!("`str` takes exactly 1 argument, found {}", args.len()),
+                    span,
+                );
+            }
+            if let Some(a) = args.first() {
+                let ty = self.check_expr(a);
+                if !matches!(
+                    ty,
+                    TypeName::Int | TypeName::Float | TypeName::Bool | TypeName::String
+                ) {
+                    self.error(
+                        "E0091",
+                        format!("`str` expects an `int`, `float`, `bool` or `string`, found `{ty}`"),
+                        a.span(),
+                    );
+                }
+            }
+            return TypeName::String;
         }
 
         if name == "char_at" {
@@ -1352,9 +1523,12 @@ impl<'a> Analyzer<'a> {
             );
         }
         for (i, arg) in args.iter().enumerate() {
-            let arg_ty = self.check_expr(arg);
+            let arg_ty = self.check_expr_expecting(arg, sig.params.get(i));
             if let Some(expected) = sig.params.get(i) {
-                if *expected != arg_ty {
+                if *expected != arg_ty
+                    && !self.is_subtype(&arg_ty, expected)
+                    && !(self.current_fn.ends_with("__vcall") && self.is_subtype(expected, &arg_ty))
+                {
                     self.error(
                         "E0035",
                         format!(
@@ -1417,6 +1591,16 @@ fn is_first_class_value(ty: &TypeName) -> bool {
     is_scalar(ty) || matches!(ty, TypeName::Void)
 }
 
+/// Any value that can be returned from a Kite function: scalars plus
+/// aggregates (returned through a hidden out-pointer, see `ir.rs`).
+fn is_returnable(ty: &TypeName) -> bool {
+    is_first_class_value(ty)
+        || matches!(
+            ty,
+            TypeName::List(_) | TypeName::Tuple(_) | TypeName::Dict(_) | TypeName::Struct(_)
+        )
+}
+
 fn op_symbol(op: BinOp) -> &'static str {
     use BinOp::*;
     match op {
@@ -1433,6 +1617,11 @@ fn op_symbol(op: BinOp) -> &'static str {
         GtEq => ">=",
         And => "and",
         Or => "or",
+        BitAnd => "&",
+        BitOr => "|",
+        BitXor => "^",
+        Shl => "<<",
+        Shr => ">>",
     }
 }
 
@@ -1534,7 +1723,13 @@ fn analyze_impl(
     for s in &program.structs {
         let before = diagnostics_len(&diagnostics);
         for field in &s.fields {
-            if !is_scalar(&field.ty) {
+            let ok = is_scalar(&field.ty)
+                || match &field.ty {
+                    TypeName::List(e) => is_scalar(e) || matches!(**e, TypeName::Struct(_)),
+                    TypeName::Struct(_) => true,
+                    _ => false,
+                };
+            if !ok {
                 diagnostics.push(Diagnostic::error(
                     "E0067",
                     format!("field `{}` of struct `{}` has type `{}`, but struct fields must be `int`/`float`/`bool`/`string` in Kite v0.1", field.name, s.name, field.ty),
@@ -1569,21 +1764,21 @@ fn analyze_impl(
     for func in &program.functions {
         let before = diagnostics_len(&diagnostics);
         for param in &func.params {
-            if !is_scalar(&param.ty) {
+            if func.is_extern && !is_scalar(&param.ty) {
                 diagnostics.push(Diagnostic::error(
                     "E0038",
-                    format!("parameter `{}` has type `{}`, but functions may only take `int`/`float`/`bool`/`string` parameters in Kite v0.1", param.name, param.ty),
+                    format!("extern parameter `{}` has type `{}`, but `extern` functions may only take `int`/`float`/`bool`/`string`/`ptr<T>` parameters", param.name, param.ty),
                     param.span,
-                ).with_help("lists, tuples, dicts, and structs are local-only in v0.1 (planned for v0.2)"));
+                ).with_help("pass a `ptr<T>` to C instead of a list/tuple/struct"));
             }
         }
         if let Some(rt) = &func.declared_return_type {
-            if !is_first_class_value(rt) {
+            if func.is_extern && !is_first_class_value(rt) {
                 diagnostics.push(Diagnostic::error(
                     "E0039",
-                    format!("function `{}` may not return `{rt}` -- functions may only return `int`/`float`/`bool`/`string`/nothing in Kite v0.1", func.name),
+                    format!("extern function `{}` may not return `{rt}`", func.name),
                     func.span,
-                ).with_help("lists, tuples, dicts, and structs are local-only in v0.1 (planned for v0.2)"));
+                ));
             }
         }
         let return_type = if func.is_extern {
@@ -1636,10 +1831,27 @@ fn analyze_impl(
     let typed = if had_errors {
         None
     } else {
+        // Inferred return types are written back so later stages never
+        // have to re-derive them (aggregates can't be re-derived cheaply).
+        let mut funcs = program.functions.clone();
+        {
+            let sigs = tables.functions.borrow();
+            for f in &mut funcs {
+                if f.declared_return_type.is_none() && !f.is_extern {
+                    if let Some(sig) = sigs.get(&f.name) {
+                        if let Some(rt) = &sig.return_type {
+                            if *rt != TypeName::Void {
+                                f.declared_return_type = Some(rt.clone());
+                            }
+                        }
+                    }
+                }
+            }
+        }
         Some(TypedProgram {
             structs: program.structs.clone(),
             enums: program.enums.clone(),
-            functions: program.functions.clone(),
+            functions: funcs,
         })
     };
     (typed, analyzer.diagnostics)
@@ -1731,6 +1943,7 @@ fn fix_block(block: &mut Block, fix_ty: &impl Fn(&TypeName) -> TypeName) {
 
 fn fix_stmt(stmt: &mut Stmt, fix_ty: &impl Fn(&TypeName) -> TypeName) {
     match stmt {
+        Stmt::Unpack { .. } | Stmt::Match { .. } => {}
         Stmt::Assign { annotated_type, .. } => {
             if let Some(ty) = annotated_type {
                 *annotated_type = Some(fix_ty(ty));
@@ -1751,6 +1964,7 @@ fn fix_stmt(stmt: &mut Stmt, fix_ty: &impl Fn(&TypeName) -> TypeName) {
             }
         }
         Stmt::Until { body, .. }
+        | Stmt::While { body, .. }
         | Stmt::Infinit { body, .. }
         | Stmt::ForRange { body, .. }
         | Stmt::ForEach { body, .. }

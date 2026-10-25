@@ -135,6 +135,14 @@ impl Lexer {
                             self.lex_number()
                         } else if c == '"' {
                             self.lex_string(start_line, start_col)
+                        } else if c == 'f' && self.chars.get(self.pos + 1) == Some(&'"') {
+                            self.advance(); // the `f` prefix
+                            match self.lex_string(start_line, start_col) {
+                                Some(TokenKind::StringLiteral(v)) => {
+                                    Some(TokenKind::FStringLiteral(v))
+                                }
+                                other => other,
+                            }
                         } else if is_ident_start(c) {
                             self.lex_identifier()
                         } else {
@@ -392,15 +400,70 @@ impl Lexer {
             ',' => Comma,
             ':' => Colon,
             '.' => Dot,
-            '+' => Plus,
-            '*' => Star,
-            '/' => Slash,
-            '%' => Percent,
-            '&' => Amp,
+            '+' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    PlusEq
+                } else {
+                    Plus
+                }
+            }
+            '*' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    StarEq
+                } else {
+                    Star
+                }
+            }
+            '/' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    SlashEq
+                } else {
+                    Slash
+                }
+            }
+            '%' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    PercentEq
+                } else {
+                    Percent
+                }
+            }
+            '&' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    AmpEq
+                } else {
+                    Amp
+                }
+            }
+            '|' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    PipeEq
+                } else {
+                    Pipe
+                }
+            }
+            '^' => {
+                if self.peek() == Some('=') {
+                    self.advance();
+                    CaretEq
+                } else {
+                    Caret
+                }
+            }
+            '~' => Tilde,
             '-' => {
                 if self.peek() == Some('>') {
                     self.advance();
                     Arrow
+                } else if self.peek() == Some('=') {
+                    self.advance();
+                    MinusEq
                 } else {
                     Minus
                 }
@@ -430,6 +493,14 @@ impl Lexer {
                 if self.peek() == Some('=') {
                     self.advance();
                     LtEq
+                } else if self.peek() == Some('<') {
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        ShlEq
+                    } else {
+                        Shl
+                    }
                 } else {
                     Lt
                 }
@@ -438,6 +509,14 @@ impl Lexer {
                 if self.peek() == Some('=') {
                     self.advance();
                     GtEq
+                } else if self.peek() == Some('>') {
+                    self.advance();
+                    if self.peek() == Some('=') {
+                        self.advance();
+                        ShrEq
+                    } else {
+                        Shr
+                    }
                 } else {
                     Gt
                 }
@@ -449,12 +528,8 @@ impl Lexer {
                     Span::new(self.pos - 1, self.pos, line, col),
                 );
                 diag = match other {
-                    '^' | '&' | '|' | '~' => diag.with_help(format!(
-                        "`{other}` is not supported in Kite v0.1\n         supported arithmetic operators: + - * / %\n         supported boolean operators:   and or not\n         supported comparisons:         == != < > <= >="
-                    )),
-                    ';' => diag.with_help(
-                        "Kite doesn't use semicolons -- statements end at the newline",
-                    ),
+                    ';' => diag
+                        .with_help("Kite doesn't use semicolons -- statements end at the newline"),
                     _ => diag,
                 };
                 self.diagnostics.push(diag);

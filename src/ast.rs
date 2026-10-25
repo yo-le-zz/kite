@@ -118,11 +118,25 @@ pub struct StructDef {
     pub name: String,
     pub fields: Vec<StructField>,
     pub span: Span,
+    /// `class Dog(Animal)` -- the base class, if any (fields are
+    /// flattened by `desugar.rs`, base fields first).
+    pub base: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 pub struct EnumVariant {
     pub name: String,
+    /// Payload of a data-carrying variant (`Add(left: int, right: int)`).
+    /// Empty for plain tag variants.
+    pub fields: Vec<(String, TypeName)>,
+    pub span: Span,
+}
+
+#[derive(Debug, Clone)]
+pub struct MatchArm {
+    pub variant: String,
+    pub binds: Vec<String>,
+    pub body: Block,
     pub span: Span,
 }
 
@@ -137,6 +151,13 @@ pub struct EnumDef {
 pub struct Param {
     pub name: String,
     pub ty: TypeName,
+    /// `make f(x: int = 3)` -- the default is substituted at every call
+    /// site that omits the argument (see `desugar.rs`).
+    pub default: Option<Expr>,
+    /// `make f(*xs: int)` -- collects the extra positional arguments into
+    /// a `[T]` list; `ty` then holds the *element* type until desugaring
+    /// rewrites it to `[T]`.
+    pub variadic: bool,
     pub span: Span,
 }
 
@@ -209,6 +230,21 @@ pub enum Stmt {
         span: Span,
     },
     Expr(Expr),
+    /// `match v:` / `case Variant(a, b):` -- rewritten by `desugar.rs`
+    /// into an `if` chain over the enum's tag.
+    Match {
+        subject: Expr,
+        arms: Vec<MatchArm>,
+        else_body: Option<Block>,
+        span: Span,
+    },
+    /// `a, b = value` -- tuple/list unpacking. Rewritten away by
+    /// `desugar.rs` into a temporary plus indexed assignments.
+    Unpack {
+        targets: Vec<String>,
+        value: Expr,
+        span: Span,
+    },
     Return {
         value: Option<Expr>,
         span: Span,
@@ -224,6 +260,13 @@ pub enum Stmt {
     },
     /// `until condition:` -- loops while `condition` is false.
     Until {
+        condition: Expr,
+        body: Block,
+        span: Span,
+    },
+    /// `while condition:` -- loops while `condition` is true (the
+    /// familiar, non-inverted direction -- `until` is kept too).
+    While {
         condition: Expr,
         body: Block,
         span: Span,
@@ -285,12 +328,21 @@ pub enum BinOp {
     GtEq,
     And,
     Or,
+    /// `&`, `|`, `^`, `<<`, `>>` -- `int` operands only. See
+    /// `docs/bitwise.md`.
+    BitAnd,
+    BitOr,
+    BitXor,
+    Shl,
+    Shr,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnOp {
     Neg,
     Not,
+    /// `~x` -- bitwise NOT (one's complement). `int` operands only.
+    BitNot,
     /// `*p` -- dereference a `ptr<T>`, yielding the `T` it points to.
     Deref,
     /// `&x` -- address-of a local variable, yielding a `ptr<T>`. Only
@@ -337,6 +389,28 @@ pub enum Expr {
     Call {
         name: String,
         args: Vec<Expr>,
+        span: Span,
+    },
+    /// `recv.name(args)` -- rewritten by `desugar.rs` into a plain call
+    /// `Class__name(recv, args)` once the receiver's class is known.
+    MethodCall {
+        recv: Box<Expr>,
+        name: String,
+        args: Vec<Expr>,
+        span: Span,
+    },
+    /// An empty list whose element type is known (produced by desugaring
+    /// of empty `*args`).
+    EmptyList {
+        elem: TypeName,
+        span: Span,
+    },
+    /// `name=value` inside a call's argument list. Only the parser
+    /// creates it and `desugar.rs` always removes it (resolving it to a
+    /// positional slot) before sema runs.
+    Named {
+        name: String,
+        value: Box<Expr>,
         span: Span,
     },
     /// `await expr` -- v0.1 evaluates `expr` synchronously and returns its
@@ -386,6 +460,9 @@ impl Expr {
             | Expr::NullLit(s)
             | Expr::Alloc { span: s, .. }
             | Expr::AllocN { span: s, .. }
+            | Expr::Named { span: s, .. }
+            | Expr::EmptyList { span: s, .. }
+            | Expr::MethodCall { span: s, .. }
             | Expr::Await { span: s, .. } => *s,
         }
     }

@@ -13,16 +13,23 @@ pub enum TokenKind {
     IntLiteral(i64),
     FloatLiteral(f64),
     StringLiteral(String),
+    /// `f"text {expr} text"` -- raw body (escapes already processed,
+    /// braces left intact); desugared by the parser.
+    FStringLiteral(String),
 
     // Identifiers & keywords
     Identifier(String),
     Make,   // fn declaration
     Extern, // extern function declaration (C FFI)
+    Class,  // `class Name(Base):`
+    Match,
+    Case,
     Return,
     If,
     Orif, // else-if
     Else,
     Until,   // loop while condition is false
+    While,   // loop while condition is true (the intuitive direction)
     Infinit, // infinite loop
     For,
     To,
@@ -84,10 +91,25 @@ pub enum TokenKind {
     LtEq,
     GtEq,
     Eq,
-    /// `&` -- address-of a local variable (`&x`), producing a `ptr<T>`.
-    /// Not a bitwise-and operator -- Kite doesn't have one yet (see
-    /// `docs/pointers.md`).
+    /// `&` -- both address-of (`&x`, prefix) and bitwise AND (`a & b`,
+    /// infix), disambiguated by position, like `*` already is between
+    /// dereference and multiplication.
     Amp,
+    Pipe,
+    Caret,
+    Tilde,
+    Shl,
+    Shr,
+    PlusEq,
+    MinusEq,
+    StarEq,
+    SlashEq,
+    PercentEq,
+    AmpEq,
+    PipeEq,
+    CaretEq,
+    ShlEq,
+    ShrEq,
 
     // Structural
     Newline,
@@ -103,14 +125,19 @@ impl fmt::Display for TokenKind {
             IntLiteral(v) => write!(f, "integer literal `{v}`"),
             FloatLiteral(v) => write!(f, "float literal `{v}`"),
             StringLiteral(v) => write!(f, "string literal \"{v}\""),
+            FStringLiteral(v) => write!(f, "f-string literal \"{v}\""),
             Identifier(name) => write!(f, "identifier `{name}`"),
             Make => write!(f, "`make`"),
             Extern => write!(f, "`extern`"),
+            Class => write!(f, "`class`"),
+            Match => write!(f, "`match`"),
+            Case => write!(f, "`case`"),
             Return => write!(f, "`return`"),
             If => write!(f, "`if`"),
             Orif => write!(f, "`orif`"),
             Else => write!(f, "`else`"),
             Until => write!(f, "`until`"),
+            While => write!(f, "`while`"),
             Infinit => write!(f, "`infinit`"),
             For => write!(f, "`for`"),
             To => write!(f, "`to`"),
@@ -162,6 +189,21 @@ impl fmt::Display for TokenKind {
             GtEq => write!(f, "`>=`"),
             Eq => write!(f, "`=`"),
             Amp => write!(f, "`&`"),
+            Pipe => write!(f, "`|`"),
+            Caret => write!(f, "`^`"),
+            Tilde => write!(f, "`~`"),
+            Shl => write!(f, "`<<`"),
+            Shr => write!(f, "`>>`"),
+            PlusEq => write!(f, "`+=`"),
+            MinusEq => write!(f, "`-=`"),
+            StarEq => write!(f, "`*=`"),
+            SlashEq => write!(f, "`/=`"),
+            PercentEq => write!(f, "`%=`"),
+            AmpEq => write!(f, "`&=`"),
+            PipeEq => write!(f, "`|=`"),
+            CaretEq => write!(f, "`^=`"),
+            ShlEq => write!(f, "`<<=`"),
+            ShrEq => write!(f, "`>>=`"),
             Newline => write!(f, "end of line"),
             Indent => write!(f, "indented block"),
             Dedent => write!(f, "end of indented block"),
@@ -193,6 +235,7 @@ pub fn lookup_keyword(ident: &str) -> Option<TokenKind> {
         "orif" => Orif,
         "else" => Else,
         "until" => Until,
+        "while" => While,
         "infinit" => Infinit,
         "for" => For,
         "to" => To,
@@ -206,6 +249,9 @@ pub fn lookup_keyword(ident: &str) -> Option<TokenKind> {
         "from" => From,
         "import" => Import,
         "type" => Type,
+        "class" => Class,
+        "match" => Match,
+        "case" => Case,
         "enum" => Enum,
         "thread" => Thread,
         "async" => Async,
