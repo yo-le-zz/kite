@@ -1,0 +1,493 @@
+//! LLVM backend tests: actually invoke `clang` to turn generated LLVM IR
+//! into a native executable and run it, checking real stdout. These are
+//! skipped (not failed) when `clang` isn't on `PATH`, so the suite stays
+//! green on machines without the LLVM toolchain installed.
+
+use kite::driver::build_executable;
+use std::process::Command;
+use tempfile::tempdir;
+
+fn clang_available() -> bool {
+    Command::new("clang")
+        .arg("--version")
+        .output()
+        .map(|o| o.status.success())
+        .unwrap_or(false)
+}
+
+/// Compiles `source` all the way to a native executable and returns its
+/// captured stdout. Skips (returns `None`) if `clang` isn't installed.
+fn run_kite_program(source: &str) -> Option<String> {
+    if !clang_available() {
+        eprintln!("skipping: clang not found on PATH");
+        return None;
+    }
+    let dir = tempdir().expect("tempdir");
+    let output_path = dir.path().join("program");
+    // Use the *returned* path, not `output_path` -- on Windows this is
+    // `program.exe`, not `program` (see
+    // `driver::normalized_executable_path`). Rust's `Command::new` does
+    // transparently retry with `.exe` appended on Windows even given
+    // the extensionless name, but relying on that silently is exactly
+    // the kind of thing that turned into a real, confusing CI failure
+    // once already -- using the authoritative path is one line and
+    // removes the question entirely.
+    let built_path = build_executable("test.ki", source, &output_path, 0, None)
+        .expect("build_executable failed");
+    let output = Command::new(built_path)
+        .output()
+        .expect("failed to run compiled program");
+    assert!(
+        output.status.success(),
+        "program exited non-zero: {output:?}"
+    );
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+/// Like [`run_kite_program`], but forwards `args` as the compiled
+/// program's own command-line arguments (for exercising `arg`/
+/// `arg_count`).
+fn run_kite_program_with_args(source: &str, args: &[&str]) -> Option<String> {
+    if !clang_available() {
+        eprintln!("skipping: clang not found on PATH");
+        return None;
+    }
+    let dir = tempdir().expect("tempdir");
+    let output_path = dir.path().join("program");
+    let built_path = build_executable("test.ki", source, &output_path, 0, None)
+        .expect("build_executable failed");
+    let output = Command::new(built_path)
+        .args(args)
+        .output()
+        .expect("failed to run compiled program");
+    assert!(
+        output.status.success(),
+        "program exited non-zero: {output:?}"
+    );
+    Some(String::from_utf8_lossy(&output.stdout).to_string())
+}
+
+#[test]
+fn hello_world_prints_and_runs() {
+    let Some(stdout) = run_kite_program("make main():\n    print(\"Hello, Kite!\")\n") else {
+        return;
+    };
+    assert_eq!(stdout, "Hello, Kite!\n");
+}
+
+#[test]
+fn arithmetic_and_functions() {
+    let source = "make add(a: int, b: int) -> int:\n    return a + b\n\nmake main():\n    print(add(3, 4))\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "7\n");
+}
+
+#[test]
+fn recursion_fibonacci() {
+    let source = "make fib(n: int) -> int:\n    if n < 2:\n        return n\n    return fib(n - 1) + fib(n - 2)\n\nmake main():\n    print(fib(10))\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "55\n");
+}
+
+#[test]
+fn lists_are_dynamic_and_zero_indexed() {
+    let source = "make main():\n    xs = [10, 20, 30]\n    print(xs[0])\n    append(xs, 40)\n    print(len(xs))\n    print(xs[3])\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "10\n4\n40\n");
+}
+
+#[test]
+fn out_of_bounds_index_aborts_safely_instead_of_crashing() {
+    if !clang_available() {
+        eprintln!("skipping: clang not found on PATH");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let output_path = dir.path().join("program");
+    let built_path = build_executable(
+        "test.ki",
+        "make main():\n    xs = [1, 2, 3]\n    print(xs[10])\n",
+        &output_path,
+        0,
+        None,
+    )
+    .expect("build_executable failed");
+    let output = Command::new(built_path)
+        .output()
+        .expect("failed to run compiled program");
+    assert!(
+        !output.status.success(),
+        "expected a non-zero exit on out-of-bounds access"
+    );
+    assert_eq!(output.status.code(), Some(1));
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(stdout.contains("out of range"), "stdout was: {stdout}");
+}
+
+#[test]
+fn finally_runs_on_early_return() {
+    let source = "make f() -> int:\n    try:\n        return 1\n    finally:\n        print(\"cleanup\")\n    return -1\n\nmake main():\n    print(f())\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "cleanup\n1\n");
+}
+
+#[test]
+fn until_and_infinit_loops_with_break() {
+    let source = "make main():\n    counter = 0\n    until counter >= 3:\n        counter = counter + 1\n    print(counter)\n    tries = 0\n    infinit:\n        tries = tries + 1\n        if tries >= 5:\n            break\n    print(tries)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "3\n5\n");
+}
+
+#[test]
+fn structs_and_field_assignment() {
+    let source = "type User:\n    name: string\n    age: int\n\nmake main():\n    u = User()\n    u.name = \"Bob\"\n    u.age = 42\n    print(u.name)\n    print(u.age)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "Bob\n42\n");
+}
+
+#[test]
+fn tuples_and_dicts() {
+    let source = "make main():\n    p = (10, 20)\n    print(p[0])\n    print(p[1])\n    d = {\n        \"x\": 1,\n    }\n    print(d[\"x\"])\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "10\n20\n1\n");
+}
+
+#[test]
+fn for_range_and_for_each() {
+    // `for i = 0 to 3:` is half-open (Python's `range(0, 3)`): 0, 1, 2.
+    let source = "make main():\n    for i = 0 to 3:\n        print(i)\n    xs = [7, 8, 9]\n    for x in xs:\n        print(x)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "0\n1\n2\n7\n8\n9\n");
+}
+
+#[test]
+fn enums_compare_and_dispatch() {
+    let source = "enum Color:\n    Red\n    Green\n    Blue\n\nmake name(c: Color) -> string:\n    if c == Color.Red:\n        return \"red\"\n    orif c == Color.Green:\n        return \"green\"\n    else:\n        return \"blue\"\n\nmake main():\n    print(name(Color.Green))\n    print(Color.Red == Color.Red)\n    print(Color.Red == Color.Blue)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "green\ntrue\nfalse\n");
+}
+
+#[test]
+fn freestanding_build_produces_object_file_without_main() {
+    if !clang_available() {
+        eprintln!("skipping: clang not found on PATH");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let output_path = dir.path().join("lib.o");
+    let src = dir.path().join("main.ki");
+    std::fs::write(
+        &src,
+        "make add(a: int, b: int) -> int:\n    return a + b\n\nmake kernel_entry() -> int:\n    return add(2, 3)\n",
+    )
+    .unwrap();
+
+    kite::driver::build_project_freestanding(&src, dir.path(), &output_path, 0, None)
+        .expect("freestanding build failed");
+
+    assert!(output_path.is_file());
+    let bytes = std::fs::read(&output_path).expect("read object file");
+    assert!(!bytes.is_empty());
+}
+
+#[test]
+fn computed_non_int_return_values_keep_their_type() {
+    // Regression test: a function returning a *computed* (non-literal)
+    // bool/float value used to be miscompiled -- codegen guessed the
+    // return type of a temporary register as always `i64`, corrupting
+    // anything that wasn't secretly int-shaped.
+    let source = "make is_even(n: int) -> bool:\n    return n % 2 == 0\n\nmake half(x: float) -> float:\n    return x / 2.0\n\nmake main():\n    print(is_even(10))\n    print(is_even(7))\n    print(half(9.0))\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "true\nfalse\n4.500000\n");
+}
+
+#[test]
+fn call_argument_that_is_a_computed_bool_or_float_keeps_its_type() {
+    // Same bug class, but for call *arguments* built from an expression
+    // rather than a bare literal/variable.
+    let source = "make describe(flag: bool) -> string:\n    if flag:\n        return \"yes\"\n    return \"no\"\n\nmake main():\n    print(describe(3 > 1))\n    print(describe(1 > 3))\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "yes\nno\n");
+}
+
+#[test]
+fn kite_can_call_c_via_extern_and_link() {
+    if !clang_available() {
+        eprintln!("skipping: clang not found on PATH");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+
+    let c_path = dir.path().join("helper.c");
+    std::fs::write(&c_path, "long c_double(long x) { return x * 2; }\n").unwrap();
+
+    let src = dir.path().join("main.ki");
+    std::fs::write(
+        &src,
+        "extern make c_double(x: int) -> int\n\nmake main():\n    print(c_double(21))\n",
+    )
+    .unwrap();
+
+    let output_path = dir.path().join("prog");
+    let built_path =
+        kite::driver::build_project(&src, dir.path(), &output_path, 0, None, false, &[c_path])
+            .expect("build with --link should succeed");
+
+    let output = Command::new(built_path)
+        .output()
+        .expect("run compiled program");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "42\n");
+}
+
+#[test]
+fn kite_lib_produces_object_and_header_callable_from_c() {
+    if !clang_available() {
+        eprintln!("skipping: clang not found on PATH");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let src = dir.path().join("main.ki");
+    std::fs::write(&src, "make kite_square(x: int) -> int:\n    return x * x\n").unwrap();
+
+    let output_path = dir.path().join("lib.o");
+    let header_path = kite::driver::build_project_lib(&src, dir.path(), &output_path, 0, None)
+        .expect("lib build should succeed");
+    assert!(output_path.is_file());
+    assert!(header_path.is_file());
+
+    let c_main = dir.path().join("main.c");
+    std::fs::write(
+        &c_main,
+        format!(
+            "#include <stdio.h>\n#include \"{}\"\nint main(void) {{ printf(\"%lld\\n\", (long long)kite_square(6)); return 0; }}\n",
+            header_path.display()
+        ),
+    )
+    .unwrap();
+
+    let exe_path = dir.path().join("c_prog");
+    let status = Command::new("clang")
+        .args([
+            c_main.to_str().unwrap(),
+            output_path.to_str().unwrap(),
+            "-o",
+            exe_path.to_str().unwrap(),
+        ])
+        .status()
+        .expect("clang link should run");
+    assert!(status.success());
+
+    let output = Command::new(&exe_path).output().expect("run c program");
+    assert!(output.status.success());
+    assert_eq!(String::from_utf8_lossy(&output.stdout), "36\n");
+}
+
+#[test]
+fn char_at_and_substr_work() {
+    let source = "make main():\n    s = \"hello world\"\n    print(len(s))\n    print(char_at(s, 0))\n    print(substr(s, 0, 5))\n    print(substr(s, 6, 11))\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "11\n104\nhello\nworld\n");
+}
+
+#[test]
+fn substr_full_string_round_trips() {
+    let source = "make main():\n    s = \"kite\"\n    t = substr(s, 0, len(s))\n    print(t)\n    print(t == s)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "kite\ntrue\n");
+}
+
+#[test]
+fn string_concatenation_with_plus() {
+    let source = "make greet(name: string) -> string:\n    return \"Hello, \" + name + \"!\"\n\nmake main():\n    print(greet(\"Kite\"))\n    a = \"foo\"\n    b = \"bar\"\n    c = a + b\n    print(c)\n    print(len(c))\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "Hello, Kite!\nfoobar\n6\n");
+}
+
+#[test]
+fn concatenation_result_is_independently_addressable_from_its_operands() {
+    // The concatenated buffer must be a fresh allocation, not an alias
+    // into either operand -- building a second concatenation from the
+    // same left-hand operand must not change a previously-produced
+    // result.
+    let source = "make main():\n    a = \"ab\"\n    b = \"cd\"\n    first = a + b\n    second = a + \"XY\"\n    print(first)\n    print(second)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "abcd\nabXY\n");
+}
+
+#[test]
+fn or_short_circuits_correctly_with_three_or_more_operands() {
+    // Regression test: `or` chains longer than two operands were
+    // miscompiled -- the short-circuit branch polarity for `or` reused
+    // `and`'s (correct only for `and`), so `a or b or c` evaluated to
+    // `true` the moment the *first* operand was false, and to the
+    // *second* operand's value (ignoring that the first was true) when
+    // the first operand was true.
+    let source = "make is_space(c: int) -> bool:\n    return c == 32 or c == 9 or c == 13 or c == 10\n\nmake main():\n    print(is_space(32))\n    print(is_space(109))\n    print(is_space(10))\n    print(1 == 2 or 3 == 3 or 4 == 5)\n    print(1 == 2 or 3 == 4 or 5 == 6)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "true\nfalse\ntrue\ntrue\nfalse\n");
+}
+
+#[test]
+fn write_file_then_read_file_round_trips() {
+    if !clang_available() {
+        eprintln!("skipping: clang not found on PATH");
+        return;
+    }
+    let dir = tempdir().expect("tempdir");
+    let path = dir.path().join("roundtrip.txt");
+    let path_str = path.to_str().expect("tempdir path is valid UTF-8");
+    let source = format!(
+        "make main():\n    ok = write_file(\"{path}\", \"hello from kite\\n\")\n    print(ok)\n    content = read_file(\"{path}\")\n    print(content)\n",
+        path = path_str.replace('\\', "\\\\")
+    );
+    let output_path = dir.path().join("program");
+    let built_path = build_executable("test.ki", &source, &output_path, 0, None)
+        .expect("build_executable failed");
+    let output = Command::new(built_path)
+        .output()
+        .expect("failed to run compiled program");
+    assert!(
+        output.status.success(),
+        "program exited non-zero: {output:?}"
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    assert_eq!(stdout, "true\nhello from kite\n\n");
+    assert_eq!(std::fs::read_to_string(&path).unwrap(), "hello from kite\n");
+}
+
+#[test]
+fn read_file_on_a_missing_path_yields_an_empty_string() {
+    let source = "make main():\n    content = read_file(\"/this/path/definitely/does/not/exist/kite-test.txt\")\n    print(len(content))\n    print(content)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "0\n\n");
+}
+
+#[test]
+fn arg_count_and_arg_reflect_real_command_line_arguments() {
+    let source = "make main():\n    print(arg_count())\n    i = 0\n    while i < arg_count():\n        print(arg(i))\n        i = i + 1\n";
+    let Some(stdout) = run_kite_program_with_args(source, &["foo", "bar", "baz"]) else {
+        return;
+    };
+    assert_eq!(stdout, "3\nfoo\nbar\nbaz\n");
+}
+
+#[test]
+fn arg_count_is_zero_with_no_arguments() {
+    let source = "make main():\n    print(arg_count())\n";
+    let Some(stdout) = run_kite_program_with_args(source, &[]) else {
+        return;
+    };
+    assert_eq!(stdout, "0\n");
+}
+
+#[test]
+fn pointer_alloc_deref_and_free_round_trip() {
+    let source =
+        "make main():\n    p: ptr<int> = alloc(int)\n    *p = 42\n    print(*p)\n    free(p)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "42\n");
+}
+
+#[test]
+fn null_pointer_comparison() {
+    let source = "make main():\n    p: ptr<int> = null\n    print(p == null)\n    print(p != null)\n    p = alloc(int)\n    print(p == null)\n    free(p)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "true\nfalse\nfalse\n");
+}
+
+#[test]
+fn two_pointers_to_the_same_allocation_compare_equal() {
+    let source = "make main():\n    p: ptr<int> = alloc(int)\n    q = p\n    print(p == q)\n    *p = 5\n    print(*q)\n    free(p)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "true\n5\n");
+}
+
+#[test]
+fn alloc_zero_initializes_memory() {
+    let source = "make main():\n    p: ptr<int> = alloc(int)\n    print(*p)\n    free(p)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "0\n");
+}
+
+#[test]
+fn alloc_n_and_pointer_arithmetic_build_an_array() {
+    let source = "make main():\n    r: ptr<int> = alloc_n(int, 5)\n    i = 0\n    until i >= 5:\n        *(r + i) = i * 10\n        i = i + 1\n    i = 0\n    until i >= 5:\n        print(*(r + i))\n        i = i + 1\n    free(r)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "0\n10\n20\n30\n40\n");
+}
+
+#[test]
+fn address_of_a_local_reads_and_writes_through_to_it() {
+    let source = "make main():\n    x = 7\n    p = &x\n    print(*p)\n    *p = 99\n    print(x)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "7\n99\n");
+}
+
+#[test]
+fn pointers_to_structs_can_be_allocated_compared_and_freed() {
+    // Field access *through* a struct pointer (`(*p).x = ...`) isn't
+    // supported yet -- see the E0099 diagnostic in `sema.rs` and
+    // `docs/pointers.md` -- but allocating, passing around, comparing,
+    // and freeing a `ptr<Struct>` all work today.
+    let source = "type Point:\n    x: int\n    y: int\n\nmake main():\n    p: ptr<Point> = alloc(Point)\n    q = p\n    print(p == q)\n    s = *p\n    s.x = 3\n    s.y = 4\n    print(s.x + s.y)\n    free(p)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "true\n7\n");
+}
+
+#[test]
+fn pointers_can_be_function_parameters_and_return_values() {
+    let source = "make set_to(p: ptr<int>, v: int):\n    *p = v\n\nmake make_ptr() -> ptr<int>:\n    p: ptr<int> = alloc(int)\n    return p\n\nmake main():\n    p = make_ptr()\n    set_to(p, 123)\n    print(*p)\n    free(p)\n";
+    let Some(stdout) = run_kite_program(source) else {
+        return;
+    };
+    assert_eq!(stdout, "123\n");
+}

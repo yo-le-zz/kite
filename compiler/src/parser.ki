@@ -1,0 +1,1430 @@
+// The Kite parser (port of src/parser.rs). Node ids index the Ast arena;
+// -1 stands for `Err(())` / `None`.
+
+use diag
+use lexer
+use ast
+
+class Parser:
+    toks: [Token]
+    pos: int
+    current_class: string
+    diags: Diags
+    ast: Ast
+    pending_fns: [int]
+
+    make init(self, toks: [Token]):
+        self.toks = toks
+        self.pos = 0
+        self.current_class = ""
+
+    // ---- token helpers ----------------------------------------------------
+    make cur(self) -> int:
+        return min(self.pos, len(self.toks) - 1)
+
+    make idx(self, off: int) -> int:
+        return min(self.pos + off, len(self.toks) - 1)
+
+    make peek(self) -> string:
+        return self.toks[self.cur()].kind
+
+    make peek_at(self, off: int) -> string:
+        return self.toks[self.idx(off)].kind
+
+    make token_at(self, i: int) -> string:
+        return self.toks[min(i, len(self.toks) - 1)].kind
+
+    make peek_span(self) -> Span:
+        return self.toks[self.cur()].span
+
+    make tspan(self, t: int) -> Span:
+        return self.toks[t].span
+
+    make ttext(self, t: int) -> string:
+        return self.toks[t].text
+
+    make at(self, kind: string) -> bool:
+        return self.peek() == kind
+
+    make advance(self) -> int:
+        t = self.cur()
+        if self.pos < len(self.toks) - 1:
+            self.pos += 1
+        return t
+
+    make found(self) -> string:
+        return token_display(self.toks[self.cur()])
+
+    make expect(self, kind: string) -> int:
+        if self.at(kind):
+            return self.advance()
+        shown = kind_display(kind)
+        if kind == "StringLiteral":
+            shown = "string literal \"\""
+        self.diags.add("E0010", "expected " + shown + ", found " + self.found(), self.peek_span(), "expected " + shown + " here")
+        return -1
+
+    make expect_identifier(self) -> int:
+        if self.at("Identifier"):
+            return self.advance()
+        self.diags.add("E0013", "expected an identifier, found " + self.found(), self.peek_span())
+        return -1
+
+    make skip_blank_newlines(self):
+        while self.at("Newline"):
+            self.advance()
+
+    make synchronize_to_top_level(self):
+        while not self.at("Eof") and not self.at("Make") and not self.at("Async") and not self.at("Extern") and not self.at("Type") and not self.at("Enum") and not self.at("Use") and not self.at("From"):
+            self.advance()
+
+    make synchronize_to_next_stmt(self):
+        while not self.at("Eof") and not self.at("Newline") and not self.at("Dedent"):
+            self.advance()
+        if self.at("Newline"):
+            self.advance()
+
+    // ---- program ----------------------------------------------------------
+    make parse_program(self) -> int:
+        imports: [int] = []
+        structs: [int] = []
+        enums: [int] = []
+        functions: [int] = []
+        start = self.peek_span()
+        self.skip_blank_newlines()
+        while not self.at("Eof"):
+            k = self.peek()
+            ok = true
+            if k == "Use" or k == "From":
+                r = self.parse_import()
+                if r < 0:
+                    ok = false
+                else:
+                    append(imports, r)
+            orif k == "Type":
+                r = self.parse_struct_def()
+                if r < 0:
+                    ok = false
+                else:
+                    append(structs, r)
+            orif k == "Class":
+                clear(self.pending_fns)
+                r = self.parse_class_def()
+                if r < 0:
+                    ok = false
+                else:
+                    append(structs, r)
+                    for f in self.pending_fns:
+                        append(functions, f)
+            orif k == "Enum":
+                r = self.parse_enum_def()
+                if r < 0:
+                    ok = false
+                else:
+                    append(enums, r)
+            orif k == "Async" or k == "Make" or k == "Extern":
+                r = self.parse_function()
+                if r < 0:
+                    ok = false
+                else:
+                    append(functions, r)
+            else:
+                self.diags.add("E0010", "expected `use`, `from`, `type`, `class`, `enum`, `extern`, or `make`, found " + self.found(), self.peek_span())
+                ok = false
+            if not ok:
+                self.synchronize_to_top_level()
+            self.skip_blank_newlines()
+        if self.diags.had_errors():
+            return -1
+        a = self.ast.addl("List", "", start, imports)
+        b = self.ast.addl("List", "", start, structs)
+        c = self.ast.addl("List", "", start, enums)
+        d = self.ast.addl("List", "", start, functions)
+        return self.ast.add4("Program", "", start, a, b, c, d)
+
+    make parse_import(self) -> int:
+        start = self.peek_span()
+        node = -1
+        if self.at("Use"):
+            self.advance()
+            path = self.parse_dotted_path()
+            if len(path) == 0:
+                return -1
+            node = self.ast.add0("ImportModule", path, start)
+        else:
+            if self.expect("From") < 0:
+                return -1
+            path = self.parse_dotted_path()
+            if len(path) == 0:
+                return -1
+            if self.expect("Import") < 0:
+                return -1
+            items: [int] = []
+            t = self.expect_identifier()
+            if t < 0:
+                return -1
+            append(items, self.ast.add0("Name", self.ttext(t), self.tspan(t)))
+            while self.at("Comma"):
+                self.advance()
+                t2 = self.expect_identifier()
+                if t2 < 0:
+                    return -1
+                append(items, self.ast.add0("Name", self.ttext(t2), self.tspan(t2)))
+            node = self.ast.addl("ImportItems", path, start, items)
+        if self.expect("Newline") < 0:
+            return -1
+        return node
+
+    // Returns "" on failure (a path is never empty on success).
+    make parse_dotted_path(self) -> string:
+        t = self.expect_identifier()
+        if t < 0:
+            return ""
+        path = self.ttext(t)
+        while self.at("Dot"):
+            self.advance()
+            t2 = self.expect_identifier()
+            if t2 < 0:
+                return ""
+            path = path + "." + self.ttext(t2)
+        return path
+
+    // ---- type definitions --------------------------------------------------
+    make parse_class_def(self) -> int:
+        st = self.expect("Class")
+        if st < 0:
+            return -1
+        start = self.tspan(st)
+        nt = self.expect_identifier()
+        if nt < 0:
+            return -1
+        name = self.ttext(nt)
+        base = -1
+        if self.at("LParen"):
+            self.advance()
+            bt = self.expect_identifier()
+            if bt < 0:
+                return -1
+            base = self.ast.add0("Name", self.ttext(bt), self.tspan(bt))
+            if self.expect("RParen") < 0:
+                return -1
+        if self.expect("Colon") < 0:
+            return -1
+        if self.expect("Newline") < 0:
+            return -1
+        if self.expect("Indent") < 0:
+            return -1
+        self.current_class = name
+        fields: [int] = []
+        methods: [int] = []
+        while not self.at("Dedent") and not self.at("Eof"):
+            if self.at("Newline"):
+                self.advance()
+                continue
+            if self.at("Make") or self.at("Async"):
+                f = self.parse_function()
+                if f < 0:
+                    self.current_class = ""
+                    return -1
+                self.ast.nodes[f].text = name + "__" + self.ast.nodes[f].text
+                append(methods, f)
+            else:
+                ft = self.expect_identifier()
+                if ft < 0:
+                    return -1
+                if self.expect("Colon") < 0:
+                    return -1
+                ty = self.parse_type()
+                if ty < 0:
+                    return -1
+                if self.expect("Newline") < 0:
+                    return -1
+                append(fields, self.ast.add1("Field", self.ttext(ft), self.tspan(ft), ty))
+        self.current_class = ""
+        et = self.expect("Dedent")
+        if et < 0:
+            return -1
+        fl = self.ast.addl("List", "", start, fields)
+        self.pending_fns = methods
+        return self.ast.add2("Struct", name, span_to(start, self.tspan(et)), base, fl)
+
+    make parse_struct_def(self) -> int:
+        st = self.expect("Type")
+        if st < 0:
+            return -1
+        start = self.tspan(st)
+        nt = self.expect_identifier()
+        if nt < 0:
+            return -1
+        name = self.ttext(nt)
+        if self.expect("Colon") < 0:
+            return -1
+        if self.expect("Newline") < 0:
+            return -1
+        if self.expect("Indent") < 0:
+            return -1
+        fields: [int] = []
+        while not self.at("Dedent") and not self.at("Eof"):
+            if self.at("Newline"):
+                self.advance()
+                continue
+            ft = self.expect_identifier()
+            if ft < 0:
+                return -1
+            if self.expect("Colon") < 0:
+                return -1
+            ty = self.parse_type()
+            if ty < 0:
+                return -1
+            if self.expect("Newline") < 0:
+                return -1
+            append(fields, self.ast.add1("Field", self.ttext(ft), self.tspan(ft), ty))
+        et = self.expect("Dedent")
+        if et < 0:
+            return -1
+        fl = self.ast.addl("List", "", start, fields)
+        return self.ast.add2("Struct", name, span_to(start, self.tspan(et)), -1, fl)
+
+    make parse_enum_def(self) -> int:
+        st = self.expect("Enum")
+        if st < 0:
+            return -1
+        start = self.tspan(st)
+        nt = self.expect_identifier()
+        if nt < 0:
+            return -1
+        name = self.ttext(nt)
+        if self.expect("Colon") < 0:
+            return -1
+        if self.expect("Newline") < 0:
+            return -1
+        if self.expect("Indent") < 0:
+            return -1
+        variants: [int] = []
+        while not self.at("Dedent") and not self.at("Eof"):
+            if self.at("Newline"):
+                self.advance()
+                continue
+            vt = self.expect_identifier()
+            if vt < 0:
+                return -1
+            vfields: [int] = []
+            if self.at("LParen"):
+                self.advance()
+                while true:
+                    if self.at("Identifier") and self.peek_at(1) == "Colon":
+                        n = self.expect_identifier()
+                        self.advance()
+                        ty = self.parse_type()
+                        if ty < 0:
+                            return -1
+                        append(vfields, self.ast.add1("VField", self.ttext(n), self.tspan(n), ty))
+                    else:
+                        ty = self.parse_type()
+                        if ty < 0:
+                            return -1
+                        append(vfields, self.ast.add1("VField", "f" + str(len(vfields)), self.ast.span_of(ty), ty))
+                    if self.at("Comma"):
+                        self.advance()
+                    else:
+                        break
+                if self.expect("RParen") < 0:
+                    return -1
+            if self.expect("Newline") < 0:
+                return -1
+            append(variants, self.ast.addl("Variant", self.ttext(vt), self.tspan(vt), vfields))
+        et = self.expect("Dedent")
+        if et < 0:
+            return -1
+        span = span_to(start, self.tspan(et))
+        if len(variants) == 0:
+            self.diags.add("E0068", "enum `" + name + "` has no variants", span, "", "an enum needs at least one variant, e.g. `enum Color:\\n    Red\\n    Green\\n    Blue`")
+        vl = self.ast.addl("List", "", start, variants)
+        return self.ast.add1("Enum", name, span, vl)
+
+    make parse_type(self) -> int:
+        span = self.peek_span()
+        k = self.peek()
+        if k == "KwInt":
+            self.advance()
+            return self.ast.add0("Type", "int", span)
+        if k == "KwFloat":
+            self.advance()
+            return self.ast.add0("Type", "float", span)
+        if k == "KwBool":
+            self.advance()
+            return self.ast.add0("Type", "bool", span)
+        if k == "KwString":
+            self.advance()
+            return self.ast.add0("Type", "string", span)
+        if k == "KwPtr":
+            self.advance()
+            if self.expect("Lt") < 0:
+                return -1
+            inner = self.parse_type()
+            if inner < 0:
+                return -1
+            if self.expect("Gt") < 0:
+                return -1
+            return self.ast.add0("Type", "ptr<" + self.ast.text_of(inner) + ">", span)
+        if k == "Identifier":
+            t = self.advance()
+            return self.ast.add0("Type", self.ttext(t), span)
+        if k == "LBracket":
+            self.advance()
+            elem = self.parse_type()
+            if elem < 0:
+                return -1
+            if self.expect("RBracket") < 0:
+                return -1
+            return self.ast.add0("Type", "[" + self.ast.text_of(elem) + "]", span)
+        if k == "LParen":
+            self.advance()
+            first = self.parse_type()
+            if first < 0:
+                return -1
+            text = self.ast.text_of(first)
+            while self.at("Comma"):
+                self.advance()
+                if self.at("RParen"):
+                    break
+                nxt = self.parse_type()
+                if nxt < 0:
+                    return -1
+                text = text + ", " + self.ast.text_of(nxt)
+            if self.expect("RParen") < 0:
+                return -1
+            return self.ast.add0("Type", "(" + text + ")", span)
+        self.diags.add("E0011", "expected a type, found " + self.found(), span)
+        return -1
+
+    // ---- functions -----------------------------------------------------------
+    make parse_function(self) -> int:
+        is_extern = false
+        is_async = false
+        if self.at("Extern"):
+            self.advance()
+            is_extern = true
+        if self.at("Async"):
+            self.advance()
+            is_async = true
+        mt = self.expect("Make")
+        if mt < 0:
+            return -1
+        start = self.tspan(mt)
+        nt = self.expect_identifier()
+        if nt < 0:
+            return -1
+        name = self.ttext(nt)
+        if self.expect("LParen") < 0:
+            return -1
+        params: [int] = []
+        if not self.at("RParen"):
+            while true:
+                variadic = false
+                if self.at("Star"):
+                    self.advance()
+                    variadic = true
+                pt = self.expect_identifier()
+                if pt < 0:
+                    return -1
+                is_self = len(self.current_class) > 0 and len(params) == 0 and self.ttext(pt) == "self" and not self.at("Colon")
+                ty = -1
+                if is_self:
+                    ty = self.ast.add0("Type", self.current_class, self.tspan(pt))
+                else:
+                    if self.expect("Colon") < 0:
+                        return -1
+                    ty = self.parse_type()
+                    if ty < 0:
+                        return -1
+                default = -1
+                if self.at("Eq"):
+                    self.advance()
+                    default = self.parse_expr()
+                    if default < 0:
+                        return -1
+                flag = ""
+                if variadic:
+                    flag = "variadic"
+                fl = self.ast.add0("Flags", flag, self.tspan(pt))
+                append(params, self.ast.add3("Param", self.ttext(pt), self.tspan(pt), ty, default, fl))
+                if self.at("Comma"):
+                    self.advance()
+                else:
+                    break
+        if self.expect("RParen") < 0:
+            return -1
+        ret = -1
+        if self.at("Arrow"):
+            self.advance()
+            ret = self.parse_type()
+            if ret < 0:
+                return -1
+        flags = ""
+        if is_extern and is_async:
+            flags = "extern async"
+        orif is_extern:
+            flags = "extern"
+        orif is_async:
+            flags = "async"
+        fl2 = self.ast.add0("Flags", flags, start)
+        pl = self.ast.addl("List", "", start, params)
+        if is_extern:
+            et = self.expect("Newline")
+            if et < 0:
+                return -1
+            return self.ast.add4("Function", name, span_to(start, self.tspan(et)), pl, ret, fl2, -1)
+        if self.expect("Colon") < 0:
+            return -1
+        body = self.parse_block()
+        if body < 0:
+            return -1
+        return self.ast.add4("Function", name, span_to(start, self.ast.span_of(body)), pl, ret, fl2, body)
+
+    make parse_block(self) -> int:
+        if self.expect("Newline") < 0:
+            return -1
+        it = self.expect("Indent")
+        if it < 0:
+            return -1
+        start = self.tspan(it)
+        stmts: [int] = []
+        while not self.at("Dedent") and not self.at("Eof"):
+            if self.at("Newline"):
+                self.advance()
+                continue
+            s = self.parse_statement()
+            if s < 0:
+                self.synchronize_to_next_stmt()
+            else:
+                append(stmts, s)
+        et = self.expect("Dedent")
+        if et < 0:
+            return -1
+        return self.ast.addl("Block", "", span_to(start, self.tspan(et)), stmts)
+
+    // ---- statements -----------------------------------------------------------
+    make parse_statement(self) -> int:
+        k = self.peek()
+        if k == "Return":
+            return self.parse_return()
+        if k == "Break":
+            t = self.advance()
+            if self.expect("Newline") < 0:
+                return -1
+            return self.ast.add0("Break", "", self.tspan(t))
+        if k == "Continue":
+            t = self.advance()
+            if self.expect("Newline") < 0:
+                return -1
+            return self.ast.add0("Continue", "", self.tspan(t))
+        if k == "If":
+            return self.parse_if()
+        if k == "Until":
+            return self.parse_cond_loop("Until")
+        if k == "Match":
+            return self.parse_match()
+        if k == "While":
+            return self.parse_cond_loop("While")
+        if k == "Infinit":
+            return self.parse_body_stmt("Infinit")
+        if k == "For":
+            return self.parse_for()
+        if k == "Try":
+            return self.parse_try()
+        if k == "Thread":
+            return self.parse_body_stmt("Thread")
+        if k == "Identifier" and self.looks_like_unpack():
+            return self.parse_unpack()
+        if k == "Identifier" and self.looks_like_assignment():
+            return self.parse_assign()
+        if k == "Star" or k == "LParen":
+            return self.parse_expr_led_statement()
+        e = self.parse_expr()
+        if e < 0:
+            return -1
+        if self.expect("Newline") < 0:
+            return -1
+        return self.ast.add1("ExprStmt", "", self.ast.span_of(e), e)
+
+    make looks_like_unpack(self) -> bool:
+        i = self.pos
+        count = 0
+        while true:
+            if self.token_at(i) != "Identifier":
+                return false
+            count += 1
+            i += 1
+            t = self.token_at(i)
+            if t == "Comma":
+                i += 1
+            orif t == "Eq":
+                return count >= 2
+            else:
+                return false
+        return false
+
+    make parse_unpack(self) -> int:
+        start = self.peek_span()
+        targets: [int] = []
+        while true:
+            t = self.expect_identifier()
+            if t < 0:
+                return -1
+            append(targets, self.ast.add0("Name", self.ttext(t), self.tspan(t)))
+            if self.at("Comma"):
+                self.advance()
+            else:
+                break
+        if self.expect("Eq") < 0:
+            return -1
+        value = self.parse_expr()
+        if value < 0:
+            return -1
+        if self.expect("Newline") < 0:
+            return -1
+        tl = self.ast.addl("List", "", start, targets)
+        return self.ast.add2("Unpack", "", span_to(start, self.ast.span_of(value)), tl, value)
+
+    make looks_like_assignment(self) -> bool:
+        i = self.pos
+        if self.peek_at(0) != "Identifier":
+            return false
+        i += 1
+        while true:
+            t = self.token_at(i)
+            if t == "Dot":
+                if self.token_at(i + 1) == "Identifier":
+                    i += 2
+                    continue
+                break
+            orif t == "LBracket":
+                depth = 1
+                i += 1
+                while depth > 0:
+                    u = self.token_at(i)
+                    if u == "LBracket":
+                        depth += 1
+                    orif u == "RBracket":
+                        depth -= 1
+                    orif u == "Eof" or u == "Newline":
+                        return false
+                    i += 1
+                continue
+            else:
+                break
+        t2 = self.token_at(i)
+        return t2 == "Eq" or t2 == "Colon" or t2 == "PlusEq" or t2 == "MinusEq" or t2 == "StarEq" or t2 == "SlashEq" or t2 == "PercentEq" or t2 == "AmpEq" or t2 == "PipeEq" or t2 == "CaretEq" or t2 == "ShlEq" or t2 == "ShrEq"
+
+    make expr_to_lvalue(self, e: int) -> int:
+        k = self.ast.kind_of(e)
+        sp = self.ast.span_of(e)
+        if k == "Ident":
+            return self.ast.add0("LIdent", self.ast.text_of(e), span_dummy())
+        if k == "Field":
+            return self.ast.add1("LField", self.ast.text_of(e), sp, self.ast.kid(e, 0))
+        if k == "Index":
+            return self.ast.add2("LIndex", "", sp, self.ast.kid(e, 0), self.ast.kid(e, 1))
+        if k == "Unary" and self.ast.text_of(e) == "Deref":
+            return self.ast.add1("LDeref", "", sp, self.ast.kid(e, 0))
+        return -1
+
+    make lvalue_to_expr(self, lv: int, fallback: Span) -> int:
+        k = self.ast.kind_of(lv)
+        sp = self.ast.span_of(lv)
+        if k == "LIdent":
+            return self.ast.add0("Ident", self.ast.text_of(lv), fallback)
+        if k == "LField":
+            return self.ast.add1("Field", self.ast.text_of(lv), sp, self.ast.kid(lv, 0))
+        if k == "LIndex":
+            return self.ast.add2("Index", "", sp, self.ast.kid(lv, 0), self.ast.kid(lv, 1))
+        return self.ast.add1("Unary", "Deref", sp, self.ast.kid(lv, 0))
+
+    make parse_expr_led_statement(self) -> int:
+        start_span = self.peek_span()
+        target = self.parse_unary()
+        if target < 0:
+            return -1
+        if self.at("Eq"):
+            self.advance()
+            value = self.parse_expr()
+            if value < 0:
+                return -1
+            if self.expect("Newline") < 0:
+                return -1
+            span = span_to(start_span, self.ast.span_of(value))
+            tspan = self.ast.span_of(target)
+            lv = self.expr_to_lvalue(target)
+            if lv < 0:
+                self.diags.add("E0098", "this expression can't be assigned to", tspan)
+                return -1
+            return self.ast.add3("Assign", "", span, lv, -1, value)
+        if self.expect("Newline") < 0:
+            return -1
+        return self.ast.add1("ExprStmt", "", self.ast.span_of(target), target)
+
+    make compound_op(self) -> string:
+        k = self.peek()
+        if k == "PlusEq":
+            return "Add"
+        if k == "MinusEq":
+            return "Sub"
+        if k == "StarEq":
+            return "Mul"
+        if k == "SlashEq":
+            return "Div"
+        if k == "PercentEq":
+            return "Mod"
+        if k == "AmpEq":
+            return "BitAnd"
+        if k == "PipeEq":
+            return "BitOr"
+        if k == "CaretEq":
+            return "BitXor"
+        if k == "ShlEq":
+            return "Shl"
+        if k == "ShrEq":
+            return "Shr"
+        return ""
+
+    make parse_assign(self) -> int:
+        start = self.peek_span()
+        target = self.parse_lvalue()
+        if target < 0:
+            return -1
+        annotated = -1
+        if self.at("Colon"):
+            self.advance()
+            annotated = self.parse_type()
+            if annotated < 0:
+                return -1
+        op = self.compound_op()
+        value = -1
+        if len(op) > 0:
+            if annotated >= 0:
+                self.diags.add("E0100", "a compound assignment (`+=` and friends) can't also have a type annotation", start)
+                return -1
+            self.advance()
+            rhs = self.parse_expr()
+            if rhs < 0:
+                return -1
+            tspan = span_to(start, self.ast.span_of(rhs))
+            texpr = self.lvalue_to_expr(target, tspan)
+            value = self.ast.add2("Binary", op, tspan, texpr, rhs)
+        else:
+            if self.expect("Eq") < 0:
+                return -1
+            value = self.parse_expr()
+            if value < 0:
+                return -1
+        if self.expect("Newline") < 0:
+            return -1
+        return self.ast.add3("Assign", "", span_to(start, self.ast.span_of(value)), target, annotated, value)
+
+    make parse_lvalue(self) -> int:
+        tok = self.expect_identifier()
+        if tok < 0:
+            return -1
+        tspan = self.tspan(tok)
+        lv = self.ast.add0("LIdent", self.ttext(tok), span_dummy())
+        while true:
+            k = self.peek()
+            if k == "Dot":
+                self.advance()
+                ft = self.expect_identifier()
+                if ft < 0:
+                    return -1
+                base = self.lvalue_to_expr(lv, tspan)
+                lv = self.ast.add1("LField", self.ttext(ft), self.tspan(ft), base)
+            orif k == "LBracket":
+                self.advance()
+                index = self.parse_expr()
+                if index < 0:
+                    return -1
+                et = self.expect("RBracket")
+                if et < 0:
+                    return -1
+                base = self.lvalue_to_expr(lv, tspan)
+                lv = self.ast.add2("LIndex", "", span_to(tspan, self.tspan(et)), base, index)
+            else:
+                break
+        return lv
+
+    make parse_return(self) -> int:
+        st = self.expect("Return")
+        if st < 0:
+            return -1
+        value = -1
+        if not self.at("Newline"):
+            value = self.parse_expr()
+            if value < 0:
+                return -1
+        if self.expect("Newline") < 0:
+            return -1
+        return self.ast.add1("Return", "", self.tspan(st), value)
+
+    make parse_match(self) -> int:
+        st = self.expect("Match")
+        if st < 0:
+            return -1
+        start = self.tspan(st)
+        subject = self.parse_expr()
+        if subject < 0:
+            return -1
+        if self.expect("Colon") < 0:
+            return -1
+        if self.expect("Newline") < 0:
+            return -1
+        if self.expect("Indent") < 0:
+            return -1
+        arms: [int] = []
+        else_body = -1
+        while not self.at("Dedent") and not self.at("Eof"):
+            if self.at("Newline"):
+                self.advance()
+                continue
+            if self.at("Else"):
+                self.advance()
+                if self.expect("Colon") < 0:
+                    return -1
+                else_body = self.parse_block()
+                if else_body < 0:
+                    return -1
+                continue
+            ct = self.expect("Case")
+            if ct < 0:
+                return -1
+            vt = self.expect_identifier()
+            if vt < 0:
+                return -1
+            kids: [int] = []
+            if self.at("LParen"):
+                self.advance()
+                if not self.at("RParen"):
+                    while true:
+                        b = self.expect_identifier()
+                        if b < 0:
+                            return -1
+                        append(kids, self.ast.add0("Name", self.ttext(b), self.tspan(b)))
+                        if self.at("Comma"):
+                            self.advance()
+                        else:
+                            break
+                if self.expect("RParen") < 0:
+                    return -1
+            if self.expect("Colon") < 0:
+                return -1
+            body = self.parse_block()
+            if body < 0:
+                return -1
+            append(kids, body)
+            append(arms, self.ast.addl("Arm", self.ttext(vt), span_to(self.tspan(ct), self.ast.span_of(body)), kids))
+        et = self.expect("Dedent")
+        if et < 0:
+            return -1
+        al = self.ast.addl("List", "", start, arms)
+        return self.ast.add3("Match", "", span_to(start, self.tspan(et)), subject, al, else_body)
+
+    make parse_if(self) -> int:
+        st = self.expect("If")
+        if st < 0:
+            return -1
+        start = self.tspan(st)
+        cond = self.parse_expr()
+        if cond < 0:
+            return -1
+        if self.expect("Colon") < 0:
+            return -1
+        then_b = self.parse_block()
+        if then_b < 0:
+            return -1
+        span = span_to(start, self.ast.span_of(then_b))
+        orifs: [int] = []
+        while self.at("Orif"):
+            ot = self.advance()
+            c = self.parse_expr()
+            if c < 0:
+                return -1
+            if self.expect("Colon") < 0:
+                return -1
+            body = self.parse_block()
+            if body < 0:
+                return -1
+            span = span_to(span, self.ast.span_of(body))
+            append(orifs, self.ast.add2("Orif", "", span_to(self.tspan(ot), self.ast.span_of(body)), c, body))
+        else_b = -1
+        if self.at("Else"):
+            self.advance()
+            if self.expect("Colon") < 0:
+                return -1
+            else_b = self.parse_block()
+            if else_b < 0:
+                return -1
+            span = span_to(span, self.ast.span_of(else_b))
+        ol = self.ast.addl("List", "", start, orifs)
+        return self.ast.add4("If", "", span, cond, then_b, ol, else_b)
+
+    // `until cond:` / `while cond:`
+    make parse_cond_loop(self, kind: string) -> int:
+        st = self.expect(kind)
+        if st < 0:
+            return -1
+        start = self.tspan(st)
+        cond = self.parse_expr()
+        if cond < 0:
+            return -1
+        if self.expect("Colon") < 0:
+            return -1
+        body = self.parse_block()
+        if body < 0:
+            return -1
+        return self.ast.add2(kind, "", span_to(start, self.ast.span_of(body)), cond, body)
+
+    // `infinit:` / `thread:`
+    make parse_body_stmt(self, kind: string) -> int:
+        st = self.expect(kind)
+        if st < 0:
+            return -1
+        start = self.tspan(st)
+        if self.expect("Colon") < 0:
+            return -1
+        body = self.parse_block()
+        if body < 0:
+            return -1
+        return self.ast.add1(kind, "", span_to(start, self.ast.span_of(body)), body)
+
+    make parse_for(self) -> int:
+        st = self.expect("For")
+        if st < 0:
+            return -1
+        start = self.tspan(st)
+        vt = self.expect_identifier()
+        if vt < 0:
+            return -1
+        var = self.ttext(vt)
+        if self.at("Eq"):
+            self.advance()
+            from_e = self.parse_expr()
+            if from_e < 0:
+                return -1
+            if self.expect("To") < 0:
+                return -1
+            to_e = self.parse_expr()
+            if to_e < 0:
+                return -1
+            if self.expect("Colon") < 0:
+                return -1
+            body = self.parse_block()
+            if body < 0:
+                return -1
+            return self.ast.add3("ForRange", var, span_to(start, self.ast.span_of(body)), from_e, to_e, body)
+        if self.expect("In") < 0:
+            return -1
+        iterable = self.parse_expr()
+        if iterable < 0:
+            return -1
+        if self.expect("Colon") < 0:
+            return -1
+        body = self.parse_block()
+        if body < 0:
+            return -1
+        return self.ast.add2("ForEach", var, span_to(start, self.ast.span_of(body)), iterable, body)
+
+    make parse_try(self) -> int:
+        st = self.expect("Try")
+        if st < 0:
+            return -1
+        start = self.tspan(st)
+        if self.expect("Colon") < 0:
+            return -1
+        try_b = self.parse_block()
+        if try_b < 0:
+            return -1
+        span = span_to(start, self.ast.span_of(try_b))
+        failed_var = ""
+        failed_b = -1
+        if self.at("Failed"):
+            self.advance()
+            if self.at("Identifier"):
+                t = self.expect_identifier()
+                failed_var = self.ttext(t)
+            if self.expect("Colon") < 0:
+                return -1
+            failed_b = self.parse_block()
+            if failed_b < 0:
+                return -1
+            span = span_to(span, self.ast.span_of(failed_b))
+        finally_b = -1
+        if self.at("Finally"):
+            self.advance()
+            if self.expect("Colon") < 0:
+                return -1
+            finally_b = self.parse_block()
+            if finally_b < 0:
+                return -1
+            span = span_to(span, self.ast.span_of(finally_b))
+        return self.ast.add3("Try", failed_var, span, try_b, failed_b, finally_b)
+
+    // ---- f-strings --------------------------------------------------------------
+    // f"a {x} b"  ->  "a " + str(x) + " b"
+    make desugar_fstring(self, raw: string, span: Span) -> int:
+        parts: [int] = []
+        lit = ""
+        n = len(raw)
+        i = 0
+        while i < n:
+            c = char_at(raw, i)
+            nxt = -1
+            if i + 1 < n:
+                nxt = char_at(raw, i + 1)
+            if c == 123 and nxt == 123:
+                lit = lit + "{"
+                i += 2
+            orif c == 125 and nxt == 125:
+                lit = lit + "}"
+                i += 2
+            orif c == 123:
+                depth = 1
+                j = i + 1
+                while j < n and depth > 0:
+                    d = char_at(raw, j)
+                    if d == 123:
+                        depth += 1
+                    orif d == 125:
+                        depth -= 1
+                    j += 1
+                if depth != 0:
+                    self.diags.add("E0092", "unterminated `{` in f-string", span)
+                    return -1
+                body = substr(raw, i + 1, j - 1)
+                if len(lit) > 0:
+                    append(parts, self.ast.add0("Str", lit, span))
+                    lit = ""
+                sub_diags = Diags()
+                sub_toks = lex(body, sub_diags)
+                if sub_diags.had_errors():
+                    self.diags.add("E0093", "invalid expression `" + body + "` in f-string", span)
+                    return -1
+                saved_toks = self.toks
+                saved_pos = self.pos
+                before = len(self.diags.items)
+                self.toks = sub_toks
+                self.pos = 0
+                inner = self.parse_expr()
+                self.toks = saved_toks
+                self.pos = saved_pos
+                while len(self.diags.items) > before:
+                    pop(self.diags.items)
+                if inner < 0:
+                    self.diags.add("E0093", "invalid expression `" + body + "` in f-string", span)
+                    return -1
+                append(parts, self.ast.addl("Call", "str", span, [inner]))
+                i = j
+            orif c == 125:
+                self.diags.add("E0094", "single `}` in f-string (write `}}` for a literal brace)", span)
+                return -1
+            else:
+                // copy one full UTF-8 character
+                size = 1
+                if c >= 240:
+                    size = 4
+                orif c >= 224:
+                    size = 3
+                orif c >= 192:
+                    size = 2
+                lit = lit + substr(raw, i, i + size)
+                i += size
+        if len(lit) > 0 or len(parts) == 0:
+            append(parts, self.ast.add0("Str", lit, span))
+        acc = parts[0]
+        k = 1
+        while k < len(parts):
+            acc = self.ast.add2("Binary", "Add", span, acc, parts[k])
+            k += 1
+        return acc
+
+    // ---- expressions ---------------------------------------------------------------
+    make parse_expr(self) -> int:
+        return self.parse_or()
+
+    // Left-associative binary level: `kinds`/`ops` are parallel lists.
+    make parse_or(self) -> int:
+        lhs = self.parse_and()
+        if lhs < 0:
+            return -1
+        while self.at("Or"):
+            self.advance()
+            rhs = self.parse_and()
+            if rhs < 0:
+                return -1
+            lhs = self.ast.add2("Binary", "Or", span_to(self.ast.span_of(lhs), self.ast.span_of(rhs)), lhs, rhs)
+        return lhs
+
+    make parse_and(self) -> int:
+        lhs = self.parse_not()
+        if lhs < 0:
+            return -1
+        while self.at("And"):
+            self.advance()
+            rhs = self.parse_not()
+            if rhs < 0:
+                return -1
+            lhs = self.ast.add2("Binary", "And", span_to(self.ast.span_of(lhs), self.ast.span_of(rhs)), lhs, rhs)
+        return lhs
+
+    make parse_not(self) -> int:
+        if self.at("Not"):
+            t = self.advance()
+            e = self.parse_not()
+            if e < 0:
+                return -1
+            return self.ast.add1("Unary", "Not", span_to(self.tspan(t), self.ast.span_of(e)), e)
+        return self.parse_equality()
+
+    make parse_equality(self) -> int:
+        lhs = self.parse_comparison()
+        if lhs < 0:
+            return -1
+        while true:
+            op = ""
+            k = self.peek()
+            if k == "EqEq":
+                op = "Eq"
+            orif k == "NotEq":
+                op = "NotEq"
+            else:
+                break
+            self.advance()
+            rhs = self.parse_comparison()
+            if rhs < 0:
+                return -1
+            lhs = self.ast.add2("Binary", op, span_to(self.ast.span_of(lhs), self.ast.span_of(rhs)), lhs, rhs)
+        return lhs
+
+    make parse_comparison(self) -> int:
+        lhs = self.parse_bitwise()
+        if lhs < 0:
+            return -1
+        while true:
+            op = ""
+            k = self.peek()
+            if k == "Lt":
+                op = "Lt"
+            orif k == "Gt":
+                op = "Gt"
+            orif k == "LtEq":
+                op = "LtEq"
+            orif k == "GtEq":
+                op = "GtEq"
+            else:
+                break
+            self.advance()
+            rhs = self.parse_bitwise()
+            if rhs < 0:
+                return -1
+            lhs = self.ast.add2("Binary", op, span_to(self.ast.span_of(lhs), self.ast.span_of(rhs)), lhs, rhs)
+        return lhs
+
+    make parse_bitwise(self) -> int:
+        lhs = self.parse_term()
+        if lhs < 0:
+            return -1
+        while true:
+            op = ""
+            k = self.peek()
+            if k == "Amp":
+                op = "BitAnd"
+            orif k == "Pipe":
+                op = "BitOr"
+            orif k == "Caret":
+                op = "BitXor"
+            orif k == "Shl":
+                op = "Shl"
+            orif k == "Shr":
+                op = "Shr"
+            else:
+                break
+            self.advance()
+            rhs = self.parse_term()
+            if rhs < 0:
+                return -1
+            lhs = self.ast.add2("Binary", op, span_to(self.ast.span_of(lhs), self.ast.span_of(rhs)), lhs, rhs)
+        return lhs
+
+    make parse_term(self) -> int:
+        lhs = self.parse_factor()
+        if lhs < 0:
+            return -1
+        while true:
+            op = ""
+            k = self.peek()
+            if k == "Plus":
+                op = "Add"
+            orif k == "Minus":
+                op = "Sub"
+            else:
+                break
+            self.advance()
+            rhs = self.parse_factor()
+            if rhs < 0:
+                return -1
+            lhs = self.ast.add2("Binary", op, span_to(self.ast.span_of(lhs), self.ast.span_of(rhs)), lhs, rhs)
+        return lhs
+
+    make parse_factor(self) -> int:
+        lhs = self.parse_unary()
+        if lhs < 0:
+            return -1
+        while true:
+            op = ""
+            k = self.peek()
+            if k == "Star":
+                op = "Mul"
+            orif k == "Slash":
+                op = "Div"
+            orif k == "Percent":
+                op = "Mod"
+            else:
+                break
+            self.advance()
+            rhs = self.parse_unary()
+            if rhs < 0:
+                return -1
+            lhs = self.ast.add2("Binary", op, span_to(self.ast.span_of(lhs), self.ast.span_of(rhs)), lhs, rhs)
+        return lhs
+
+    make parse_unary(self) -> int:
+        k = self.peek()
+        op = ""
+        if k == "Minus":
+            op = "Neg"
+        orif k == "Star":
+            op = "Deref"
+        orif k == "Amp":
+            op = "AddrOf"
+        orif k == "Tilde":
+            op = "BitNot"
+        if len(op) == 0:
+            return self.parse_postfix()
+        t = self.advance()
+        e = self.parse_unary()
+        if e < 0:
+            return -1
+        return self.ast.add1("Unary", op, span_to(self.tspan(t), self.ast.span_of(e)), e)
+
+    // Parses `( args )` after the opening paren has been consumed; returns the
+    // closing-paren token index, or -1. Arguments are appended to `args`.
+    make parse_call_args(self, args: [int]) -> int:
+        if not self.at("RParen"):
+            while true:
+                if self.at("Identifier") and self.peek_at(1) == "Eq":
+                    nt = self.expect_identifier()
+                    nspan = self.tspan(nt)
+                    self.advance()
+                    value = self.parse_expr()
+                    if value < 0:
+                        return -1
+                    append(args, self.ast.add1("Named", self.ttext(nt), span_to(nspan, self.ast.span_of(value)), value))
+                else:
+                    a = self.parse_expr()
+                    if a < 0:
+                        return -1
+                    append(args, a)
+                if self.at("Comma"):
+                    self.advance()
+                else:
+                    break
+        return self.expect("RParen")
+
+    make parse_postfix(self) -> int:
+        e = self.parse_primary()
+        if e < 0:
+            return -1
+        while true:
+            k = self.peek()
+            if k == "Dot":
+                self.advance()
+                ft = self.expect_identifier()
+                if ft < 0:
+                    return -1
+                if self.at("LParen"):
+                    self.advance()
+                    kids: [int] = [e]
+                    et = self.parse_call_args(kids)
+                    if et < 0:
+                        return -1
+                    e = self.ast.addl("MethodCall", self.ttext(ft), span_to(self.ast.span_of(e), self.tspan(et)), kids)
+                else:
+                    e = self.ast.add1("Field", self.ttext(ft), span_to(self.ast.span_of(e), self.tspan(ft)), e)
+            orif k == "LBracket":
+                self.advance()
+                index = self.parse_expr()
+                if index < 0:
+                    return -1
+                et = self.expect("RBracket")
+                if et < 0:
+                    return -1
+                e = self.ast.add2("Index", "", span_to(self.ast.span_of(e), self.tspan(et)), e, index)
+            orif k == "LParen" and self.ast.kind_of(e) == "Ident":
+                name = self.ast.text_of(e)
+                start = self.ast.span_of(e)
+                self.advance()
+                args: [int] = []
+                et = self.parse_call_args(args)
+                if et < 0:
+                    return -1
+                e = self.ast.addl("Call", name, span_to(start, self.tspan(et)), args)
+            else:
+                break
+        return e
+
+    make parse_primary(self) -> int:
+        span = self.peek_span()
+        k = self.peek()
+        if k == "IntLiteral":
+            t = self.advance()
+            return self.ast.add0("Int", self.ttext(t), span)
+        if k == "FloatLiteral":
+            t = self.advance()
+            return self.ast.add0("Float", self.ttext(t), span)
+        if k == "StringLiteral":
+            t = self.advance()
+            return self.ast.add0("Str", self.ttext(t), span)
+        if k == "FStringLiteral":
+            t = self.advance()
+            return self.desugar_fstring(self.ttext(t), span)
+        if k == "True":
+            self.advance()
+            return self.ast.add0("Bool", "true", span)
+        if k == "False":
+            self.advance()
+            return self.ast.add0("Bool", "false", span)
+        if k == "KwNull":
+            self.advance()
+            return self.ast.add0("Null", "", span)
+        if k == "Identifier":
+            name = self.ttext(self.cur())
+            if name == "alloc" and self.peek_at(1) == "LParen":
+                self.advance()
+                self.advance()
+                ty = self.parse_type()
+                if ty < 0:
+                    return -1
+                et = self.expect("RParen")
+                if et < 0:
+                    return -1
+                return self.ast.add1("Alloc", "", span_to(span, self.tspan(et)), ty)
+            if name == "alloc_n" and self.peek_at(1) == "LParen":
+                self.advance()
+                self.advance()
+                ty = self.parse_type()
+                if ty < 0:
+                    return -1
+                if self.expect("Comma") < 0:
+                    return -1
+                count = self.parse_expr()
+                if count < 0:
+                    return -1
+                et = self.expect("RParen")
+                if et < 0:
+                    return -1
+                return self.ast.add2("AllocN", "", span_to(span, self.tspan(et)), ty, count)
+            self.advance()
+            return self.ast.add0("Ident", name, span)
+        if k == "Await":
+            self.advance()
+            inner = self.parse_unary()
+            if inner < 0:
+                return -1
+            return self.ast.add1("Await", "", span_to(span, self.ast.span_of(inner)), inner)
+        if k == "LBracket":
+            return self.parse_list_literal(span)
+        if k == "LBrace":
+            return self.parse_dict_literal(span)
+        if k == "LParen":
+            return self.parse_paren_or_tuple(span)
+        self.diags.add("E0012", "expected an expression, found " + self.found(), span, "expected an expression here")
+        return -1
+
+    make parse_list_literal(self, start: Span) -> int:
+        self.advance()
+        items: [int] = []
+        if not self.at("RBracket"):
+            while true:
+                it = self.parse_expr()
+                if it < 0:
+                    return -1
+                append(items, it)
+                if self.at("Comma"):
+                    self.advance()
+                else:
+                    break
+        et = self.expect("RBracket")
+        if et < 0:
+            return -1
+        return self.ast.addl("ListLit", "", span_to(start, self.tspan(et)), items)
+
+    make parse_dict_literal(self, start: Span) -> int:
+        self.advance()
+        self.skip_blank_newlines()
+        entries: [int] = []
+        if not self.at("RBrace"):
+            while true:
+                self.skip_blank_newlines()
+                kt = self.expect("StringLiteral")
+                if kt < 0:
+                    return -1
+                if self.expect("Colon") < 0:
+                    return -1
+                value = self.parse_expr()
+                if value < 0:
+                    return -1
+                append(entries, self.ast.add1("Entry", self.ttext(kt), self.tspan(kt), value))
+                self.skip_blank_newlines()
+                if self.at("Comma"):
+                    self.advance()
+                    self.skip_blank_newlines()
+                    if self.at("RBrace"):
+                        break
+                else:
+                    break
+        self.skip_blank_newlines()
+        et = self.expect("RBrace")
+        if et < 0:
+            return -1
+        return self.ast.addl("DictLit", "", span_to(start, self.tspan(et)), entries)
+
+    make parse_paren_or_tuple(self, start: Span) -> int:
+        self.advance()
+        if self.at("RParen"):
+            et = self.advance()
+            return self.ast.add0("TupleLit", "", span_to(start, self.tspan(et)))
+        first = self.parse_expr()
+        if first < 0:
+            return -1
+        if self.at("Comma"):
+            items: [int] = [first]
+            while self.at("Comma"):
+                self.advance()
+                if self.at("RParen"):
+                    break
+                it = self.parse_expr()
+                if it < 0:
+                    return -1
+                append(items, it)
+            et = self.expect("RParen")
+            if et < 0:
+                return -1
+            return self.ast.addl("TupleLit", "", span_to(start, self.tspan(et)), items)
+        if self.expect("RParen") < 0:
+            return -1
+        return first
+
+// Parse a token stream into an AST rooted at the returned id (-1 on error).
+make parse_tokens(toks: [Token], ast: Ast, diags: Diags) -> int:
+    p = Parser(toks)
+    root = p.parse_program()
+    diags.extend(p.diags)
+    ast.nodes = p.ast.nodes
+    return root

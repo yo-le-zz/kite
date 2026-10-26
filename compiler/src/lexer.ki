@@ -1,0 +1,673 @@
+// The Kite lexer (port of src/lexer/mod.rs + token.rs).
+// Token kinds are strings named exactly like the Rust `TokenKind` variants.
+
+use diag
+
+type Token:
+    kind: string
+    text: string
+    ival: int
+    span: Span
+
+type RawLine:
+    indent: int
+    indent_chars: int
+    tokens: [Token]
+
+make tok_new(kind: string, text: string, ival: int, span: Span) -> Token:
+    t = Token()
+    t.kind = kind
+    t.text = text
+    t.ival = ival
+    t.span = span
+    return t
+
+// Keyword table: returns the TokenKind name, or "" if `s` is an identifier.
+make lookup_keyword(s: string) -> string:
+    if s == "make":
+        return "Make"
+    if s == "extern":
+        return "Extern"
+    if s == "return":
+        return "Return"
+    if s == "if":
+        return "If"
+    if s == "orif":
+        return "Orif"
+    if s == "else":
+        return "Else"
+    if s == "until":
+        return "Until"
+    if s == "while":
+        return "While"
+    if s == "infinit":
+        return "Infinit"
+    if s == "for":
+        return "For"
+    if s == "to":
+        return "To"
+    if s == "in":
+        return "In"
+    if s == "break":
+        return "Break"
+    if s == "continue":
+        return "Continue"
+    if s == "try":
+        return "Try"
+    if s == "failed":
+        return "Failed"
+    if s == "finally":
+        return "Finally"
+    if s == "use":
+        return "Use"
+    if s == "from":
+        return "From"
+    if s == "import":
+        return "Import"
+    if s == "type":
+        return "Type"
+    if s == "class":
+        return "Class"
+    if s == "match":
+        return "Match"
+    if s == "case":
+        return "Case"
+    if s == "enum":
+        return "Enum"
+    if s == "thread":
+        return "Thread"
+    if s == "async":
+        return "Async"
+    if s == "await":
+        return "Await"
+    if s == "and":
+        return "And"
+    if s == "or":
+        return "Or"
+    if s == "not":
+        return "Not"
+    if s == "true":
+        return "True"
+    if s == "false":
+        return "False"
+    if s == "int":
+        return "KwInt"
+    if s == "float":
+        return "KwFloat"
+    if s == "bool":
+        return "KwBool"
+    if s == "string":
+        return "KwString"
+    if s == "ptr":
+        return "KwPtr"
+    if s == "null":
+        return "KwNull"
+    return ""
+
+// Human-readable description used in "expected X, found Y" messages
+// (the Rust `Display for TokenKind`).
+make token_display(t: Token) -> string:
+    k = t.kind
+    if k == "IntLiteral":
+        return "integer literal `" + t.text + "`"
+    if k == "FloatLiteral":
+        return "float literal `" + t.text + "`"
+    if k == "StringLiteral":
+        return "string literal \"" + t.text + "\""
+    if k == "FStringLiteral":
+        return "f-string literal \"" + t.text + "\""
+    if k == "Identifier":
+        return "identifier `" + t.text + "`"
+    return kind_display(k)
+
+make kind_display(k: string) -> string:
+    if k == "Make":
+        return "`make`"
+    if k == "Extern":
+        return "`extern`"
+    if k == "Class":
+        return "`class`"
+    if k == "Match":
+        return "`match`"
+    if k == "Case":
+        return "`case`"
+    if k == "Return":
+        return "`return`"
+    if k == "If":
+        return "`if`"
+    if k == "Orif":
+        return "`orif`"
+    if k == "Else":
+        return "`else`"
+    if k == "Until":
+        return "`until`"
+    if k == "While":
+        return "`while`"
+    if k == "Infinit":
+        return "`infinit`"
+    if k == "For":
+        return "`for`"
+    if k == "To":
+        return "`to`"
+    if k == "In":
+        return "`in`"
+    if k == "Break":
+        return "`break`"
+    if k == "Continue":
+        return "`continue`"
+    if k == "Try":
+        return "`try`"
+    if k == "Failed":
+        return "`failed`"
+    if k == "Finally":
+        return "`finally`"
+    if k == "Use":
+        return "`use`"
+    if k == "From":
+        return "`from`"
+    if k == "Import":
+        return "`import`"
+    if k == "Type":
+        return "`type`"
+    if k == "Enum":
+        return "`enum`"
+    if k == "Thread":
+        return "`thread`"
+    if k == "Async":
+        return "`async`"
+    if k == "Await":
+        return "`await`"
+    if k == "And":
+        return "`and`"
+    if k == "Or":
+        return "`or`"
+    if k == "Not":
+        return "`not`"
+    if k == "True":
+        return "`true`"
+    if k == "False":
+        return "`false`"
+    if k == "KwInt":
+        return "`int`"
+    if k == "KwFloat":
+        return "`float`"
+    if k == "KwBool":
+        return "`bool`"
+    if k == "KwString":
+        return "`string`"
+    if k == "KwPtr":
+        return "`ptr`"
+    if k == "KwNull":
+        return "`null`"
+    if k == "LParen":
+        return "`(`"
+    if k == "RParen":
+        return "`)`"
+    if k == "LBracket":
+        return "`[`"
+    if k == "RBracket":
+        return "`]`"
+    if k == "LBrace":
+        return "`{`"
+    if k == "RBrace":
+        return "`}`"
+    if k == "Comma":
+        return "`,`"
+    if k == "Colon":
+        return "`:`"
+    if k == "Dot":
+        return "`.`"
+    if k == "Arrow":
+        return "`->`"
+    if k == "Plus":
+        return "`+`"
+    if k == "Minus":
+        return "`-`"
+    if k == "Star":
+        return "`*`"
+    if k == "Slash":
+        return "`/`"
+    if k == "Percent":
+        return "`%`"
+    if k == "EqEq":
+        return "`==`"
+    if k == "NotEq":
+        return "`!=`"
+    if k == "Lt":
+        return "`<`"
+    if k == "Gt":
+        return "`>`"
+    if k == "LtEq":
+        return "`<=`"
+    if k == "GtEq":
+        return "`>=`"
+    if k == "Eq":
+        return "`=`"
+    if k == "Amp":
+        return "`&`"
+    if k == "Pipe":
+        return "`|`"
+    if k == "Caret":
+        return "`^`"
+    if k == "Tilde":
+        return "`~`"
+    if k == "Shl":
+        return "`<<`"
+    if k == "Shr":
+        return "`>>`"
+    if k == "PlusEq":
+        return "`+=`"
+    if k == "MinusEq":
+        return "`-=`"
+    if k == "StarEq":
+        return "`*=`"
+    if k == "SlashEq":
+        return "`/=`"
+    if k == "PercentEq":
+        return "`%=`"
+    if k == "AmpEq":
+        return "`&=`"
+    if k == "PipeEq":
+        return "`|=`"
+    if k == "CaretEq":
+        return "`^=`"
+    if k == "ShlEq":
+        return "`<<=`"
+    if k == "ShrEq":
+        return "`>>=`"
+    if k == "Newline":
+        return "end of line"
+    if k == "Indent":
+        return "indentation"
+    if k == "Dedent":
+        return "end of indented block"
+    if k == "Eof":
+        return "end of file"
+    return k
+
+// Unicode-ish `char::is_alphabetic` (exact for ASCII; non-ASCII letters are
+// approximated by excluding Latin-1 punctuation, general punctuation,
+// symbols, arrows, CJK punctuation and emoji blocks).
+make is_alphabetic_cp(c: int) -> bool:
+    if c < 128:
+        return (c >= 97 and c <= 122) or (c >= 65 and c <= 90)
+    if c == 170 or c == 181 or c == 186:
+        return true
+    if c < 192:
+        return false
+    if c == 215 or c == 247:
+        return false
+    if c >= 8192 and c <= 11263:
+        return false
+    if c >= 12288 and c <= 12351:
+        return false
+    if c >= 126976:
+        return c >= 131072
+    return true
+
+make is_digit_cp(c: int) -> bool:
+    return c >= 48 and c <= 57
+
+make is_ident_start_cp(c: int) -> bool:
+    return is_alphabetic_cp(c) or c == 95
+
+make is_ident_continue_cp(c: int) -> bool:
+    return is_alphabetic_cp(c) or is_digit_cp(c) or c == 95
+
+class Lexer:
+    src: string
+    cps: [int]
+    offs: [int]
+    pos: int
+    line: int
+    col: int
+    diags: Diags
+    lines: [RawLine]
+    bracket_depth: int
+
+    // Decode the UTF-8 source into code points + byte offsets.
+    make init(self, source: string):
+        self.src = source
+        self.pos = 0
+        self.line = 1
+        self.col = 1
+        self.bracket_depth = 0
+        i = 0
+        n = len(source)
+        while i < n:
+            b = char_at(source, i)
+            size = 1
+            cp = b
+            if b >= 240:
+                size = 4
+                cp = ((b & 7) << 18) | ((char_at(source, i + 1) & 63) << 12) | ((char_at(source, i + 2) & 63) << 6) | (char_at(source, i + 3) & 63)
+            orif b >= 224:
+                size = 3
+                cp = ((b & 15) << 12) | ((char_at(source, i + 1) & 63) << 6) | (char_at(source, i + 2) & 63)
+            orif b >= 192:
+                size = 2
+                cp = ((b & 31) << 6) | (char_at(source, i + 1) & 63)
+            append(self.cps, cp)
+            append(self.offs, i)
+            i += size
+        append(self.offs, n)
+
+    make peek(self) -> int:
+        if self.pos < len(self.cps):
+            return self.cps[self.pos]
+        return -1
+
+    make peek_at(self, offset: int) -> int:
+        if self.pos + offset < len(self.cps):
+            return self.cps[self.pos + offset]
+        return -1
+
+    make advance(self) -> int:
+        c = self.peek()
+        if c < 0:
+            return -1
+        self.pos += 1
+        if c == 10:
+            self.line += 1
+            self.col = 1
+        else:
+            self.col += 1
+        return c
+
+    // Source text of chars [a, b).
+    make slice(self, a: int, b: int) -> string:
+        return substr(self.src, self.offs[a], self.offs[b])
+
+    make tokenize(self) -> [Token]:
+        self.scan_logical_lines()
+        return self.apply_layout()
+
+    make skip_intraline(self):
+        while true:
+            c = self.peek()
+            if c == 32 or c == 9 or c == 13:
+                self.advance()
+            orif c == 47 and self.peek_at(1) == 47:
+                while self.peek() >= 0 and self.peek() != 10:
+                    self.advance()
+            else:
+                return
+
+    make scan_logical_lines(self):
+        while true:
+            indent = 0
+            indent_chars = 0
+            while true:
+                c = self.peek()
+                if c == 32:
+                    indent += 1
+                    indent_chars += 1
+                    self.advance()
+                orif c == 9:
+                    indent = (indent / 8 + 1) * 8
+                    indent_chars += 1
+                    self.advance()
+                else:
+                    break
+            if self.peek() < 0:
+                break
+            if self.peek() == 10:
+                self.advance()
+                continue
+            if self.peek() == 47 and self.peek_at(1) == 47:
+                while self.peek() >= 0 and self.peek() != 10:
+                    self.advance()
+                continue
+            tokens: [Token] = []
+            while true:
+                self.skip_intraline()
+                c = self.peek()
+                if c < 0:
+                    break
+                if c == 10:
+                    if self.bracket_depth > 0:
+                        self.advance()
+                        continue
+                    else:
+                        self.advance()
+                        break
+                start_pos = self.pos
+                start_line = self.line
+                start_col = self.col
+                tk = Token()
+                got = false
+                if is_digit_cp(c):
+                    tk = self.lex_number()
+                    got = len(tk.kind) > 0
+                orif c == 34:
+                    tk = self.lex_string(start_line, start_col)
+                    got = len(tk.kind) > 0
+                orif c == 102 and self.peek_at(1) == 34:
+                    self.advance()
+                    tk = self.lex_string(start_line, start_col)
+                    got = len(tk.kind) > 0
+                    if got:
+                        tk.kind = "FStringLiteral"
+                orif is_ident_start_cp(c):
+                    tk = self.lex_identifier()
+                    got = true
+                else:
+                    tk = self.lex_operator(start_line, start_col)
+                    got = len(tk.kind) > 0
+                if got:
+                    tk.span = span_new(start_pos, self.pos, start_line, start_col)
+                    append(tokens, tk)
+            if len(tokens) > 0:
+                rl = RawLine()
+                rl.indent = indent
+                rl.indent_chars = indent_chars
+                rl.tokens = tokens
+                append(self.lines, rl)
+
+    make apply_layout(self) -> [Token]:
+        out: [Token] = []
+        stack_ind: [int] = [0]
+        stack_chars: [int] = [0]
+        for raw in self.lines:
+            indent = raw.indent
+            top = len(stack_ind) - 1
+            current = stack_ind[top]
+            current_chars = stack_chars[top]
+            first_span = raw.tokens[0].span
+            ord1 = 0
+            if indent > current:
+                ord1 = 1
+            orif indent < current:
+                ord1 = -1
+            ord2 = 0
+            if raw.indent_chars > current_chars:
+                ord2 = 1
+            orif raw.indent_chars < current_chars:
+                ord2 = -1
+            if ord1 != ord2:
+                self.diags.add("E0004", "inconsistent use of tabs and spaces in indentation", first_span, "", "this line's indentation is ambiguous relative to the line above it once tabs and spaces are compared directly -- indent this block with only tabs or only spaces, matching the rest of the file")
+            if indent > current:
+                append(stack_ind, indent)
+                append(stack_chars, raw.indent_chars)
+                append(out, tok_new("Indent", "", 0, first_span))
+            orif indent < current:
+                while stack_ind[len(stack_ind) - 1] > indent:
+                    pop(stack_ind)
+                    pop(stack_chars)
+                    append(out, tok_new("Dedent", "", 0, first_span))
+                if stack_ind[len(stack_ind) - 1] != indent:
+                    self.diags.add("E0005", "inconsistent indentation", first_span, "", "indentation must match an enclosing block's level")
+            for t in raw.tokens:
+                append(out, t)
+            last_span = raw.tokens[len(raw.tokens) - 1].span
+            append(out, tok_new("Newline", "", 0, last_span))
+        eof_span = span_new(self.pos, self.pos, self.line, self.col)
+        while len(stack_ind) > 1:
+            pop(stack_ind)
+            pop(stack_chars)
+            append(out, tok_new("Dedent", "", 0, eof_span))
+        append(out, tok_new("Eof", "", 0, eof_span))
+        return out
+
+    make lex_number(self) -> Token:
+        start = self.pos
+        while is_digit_cp(self.peek()):
+            self.advance()
+        is_float = false
+        if self.peek() == 46 and is_digit_cp(self.peek_at(1)):
+            is_float = true
+            self.advance()
+            while is_digit_cp(self.peek()):
+                self.advance()
+        text = self.slice(start, self.pos)
+        if is_float:
+            return tok_new("FloatLiteral", text, 0, span_dummy())
+        // integer: must fit in i64
+        too_big = false
+        if len(text) > 19:
+            too_big = true
+        orif len(text) == 19 and text > "9223372036854775807":
+            too_big = true
+        if too_big:
+            self.diags.add("E0001", "integer literal `" + text + "` is too large", span_new(start, self.pos, self.line, self.col))
+            return Token()
+        v = 0
+        i = 0
+        while i < len(text):
+            v = v * 10 + (char_at(text, i) - 48)
+            i += 1
+        return tok_new("IntLiteral", text, v, span_dummy())
+
+    make lex_string(self, start_line: int, start_col: int) -> Token:
+        self.advance()
+        value = ""
+        while true:
+            c = self.peek()
+            if c < 0 or c == 10:
+                self.diags.add("E0002", "unterminated string literal", span_new(self.pos, self.pos, start_line, start_col), "string was never closed with `\"`")
+                return Token()
+            if c == 34:
+                self.advance()
+                break
+            if c == 92:
+                self.advance()
+                e = self.peek()
+                if e < 0:
+                    break
+                at = self.pos
+                self.advance()
+                if e == 110:
+                    value = value + "\n"
+                orif e == 116:
+                    value = value + "\t"
+                orif e == 34:
+                    value = value + "\""
+                orif e == 92:
+                    value = value + "\\"
+                else:
+                    value = value + self.slice(at, at + 1)
+            else:
+                at = self.pos
+                self.advance()
+                value = value + self.slice(at, at + 1)
+        return tok_new("StringLiteral", value, 0, span_dummy())
+
+    make lex_identifier(self) -> Token:
+        start = self.pos
+        while self.peek() >= 0 and is_ident_continue_cp(self.peek()):
+            self.advance()
+        text = self.slice(start, self.pos)
+        kw = lookup_keyword(text)
+        if len(kw) > 0:
+            return tok_new(kw, "", 0, span_dummy())
+        return tok_new("Identifier", text, 0, span_dummy())
+
+    make op2(self, single: string, with_eq: string) -> Token:
+        if self.peek() == 61:
+            self.advance()
+            return tok_new(with_eq, "", 0, span_dummy())
+        return tok_new(single, "", 0, span_dummy())
+
+    make lex_operator(self, line: int, col: int) -> Token:
+        c = self.advance()
+        if c == 40:
+            self.bracket_depth += 1
+            return tok_new("LParen", "", 0, span_dummy())
+        if c == 41:
+            self.bracket_depth -= 1
+            return tok_new("RParen", "", 0, span_dummy())
+        if c == 91:
+            self.bracket_depth += 1
+            return tok_new("LBracket", "", 0, span_dummy())
+        if c == 93:
+            self.bracket_depth -= 1
+            return tok_new("RBracket", "", 0, span_dummy())
+        if c == 123:
+            self.bracket_depth += 1
+            return tok_new("LBrace", "", 0, span_dummy())
+        if c == 125:
+            self.bracket_depth -= 1
+            return tok_new("RBrace", "", 0, span_dummy())
+        if c == 44:
+            return tok_new("Comma", "", 0, span_dummy())
+        if c == 58:
+            return tok_new("Colon", "", 0, span_dummy())
+        if c == 46:
+            return tok_new("Dot", "", 0, span_dummy())
+        if c == 43:
+            return self.op2("Plus", "PlusEq")
+        if c == 42:
+            return self.op2("Star", "StarEq")
+        if c == 47:
+            return self.op2("Slash", "SlashEq")
+        if c == 37:
+            return self.op2("Percent", "PercentEq")
+        if c == 38:
+            return self.op2("Amp", "AmpEq")
+        if c == 124:
+            return self.op2("Pipe", "PipeEq")
+        if c == 94:
+            return self.op2("Caret", "CaretEq")
+        if c == 126:
+            return tok_new("Tilde", "", 0, span_dummy())
+        if c == 45:
+            if self.peek() == 62:
+                self.advance()
+                return tok_new("Arrow", "", 0, span_dummy())
+            return self.op2("Minus", "MinusEq")
+        if c == 61:
+            return self.op2("Eq", "EqEq")
+        if c == 33:
+            if self.peek() == 61:
+                self.advance()
+                return tok_new("NotEq", "", 0, span_dummy())
+            self.diags.add("E0003", "unexpected character `!` (use `not` for boolean negation)", span_new(self.pos - 1, self.pos, line, col))
+            return Token()
+        if c == 60:
+            if self.peek() == 61:
+                self.advance()
+                return tok_new("LtEq", "", 0, span_dummy())
+            if self.peek() == 60:
+                self.advance()
+                return self.op2("Shl", "ShlEq")
+            return tok_new("Lt", "", 0, span_dummy())
+        if c == 62:
+            if self.peek() == 61:
+                self.advance()
+                return tok_new("GtEq", "", 0, span_dummy())
+            if self.peek() == 62:
+                self.advance()
+                return self.op2("Shr", "ShrEq")
+            return tok_new("Gt", "", 0, span_dummy())
+        help = ""
+        if c == 59:
+            help = "Kite doesn't use semicolons -- statements end at the newline"
+        self.diags.add("E0003", "unexpected character `" + self.slice(self.pos - 1, self.pos) + "`", span_new(self.pos - 1, self.pos, line, col), "", help)
+        return Token()
+
+// Lex `source`; returns the tokens and fills `diags`.
+make lex(source: string, diags: Diags) -> [Token]:
+    lx = Lexer(source)
+    toks = lx.tokenize()
+    diags.extend(lx.diags)
+    return toks

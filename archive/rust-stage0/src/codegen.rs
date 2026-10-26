@@ -1,0 +1,1557 @@
+//! Code generation: translates [`crate::ir`] into textual LLVM IR (`.ll`).
+//!
+//! Kite emits LLVM IR as text rather than binding directly to the LLVM
+//! C++ API, keeping the compiler's own dependency graph small while still
+//! getting everything LLVM provides for free via the system
+//! `clang` toolchain invoked by [`crate::driver`].
+//!
+//! ## Runtime support
+//!
+//! Kite v0.1 has no bespoke runtime library -- it leans on a handful of
+//! libc functions declared at the top of every module: `printf` (for
+//! `print`), `malloc`/`realloc`/`free`/`memcpy` (for growable lists --
+//! see `emit_list_append`), `strlen` (for `len` on strings), and `exit`
+//! (for the safety abort a failed runtime bounds check triggers).
+
+use crate::ir::*;
+use std::collections::HashMap;
+use std::fmt::Write as _;
+
+pub struct CodegenOptions {
+    pub target_triple: Option<String>,
+    /// When true, `main` is emitted as an ordinary function using its own
+    /// declared/inferred return type instead of being special-cased into
+    /// a hosted-C-runtime `i32 @main()` entry point (see `kite build
+    /// --freestanding`). Used for code meant to be linked into another
+    /// C/kernel/OS build rather than run standalone.
+    pub freestanding: bool,
+}
+
+/// Emits a complete LLVM IR module (as text) for a Kite program.
+pub fn emit_module(program: &IrProgram, options: &CodegenOptions) -> String {
+    let mut ctx = ModuleCtx::default();
+    for s in &program.structs {
+        ctx.structs.insert(s.name.clone(), s.fields.clone());
+    }
+    let mut out = String::new();
+
+    if let Some(triple) = &options.target_triple {
+        let _ = writeln!(out, "target triple = \"{triple}\"");
+        out.push('\n');
+    }
+
+    // Named struct type declarations.
+    for s in &program.structs {
+        let fields: Vec<String> = s.fields.iter().map(|(_, ty)| llvm_type(ty)).collect();
+        let _ = writeln!(out, "%{} = type {{ {} }}", s.name, fields.join(", "));
+    }
+    if !program.structs.is_empty() {
+        out.push('\n');
+    }
+
+    out.push_str("declare i32 @printf(i8*, ...)\n");
+    out.push_str("declare i8* @malloc(i64)\n");
+    out.push_str("declare void @free(i8*)\n");
+    out.push_str("declare i8* @memcpy(i8*, i8*, i64)\n");
+    out.push_str("declare i64 @strlen(i8*)\n");
+    out.push_str("declare i8* @memmove(i8*, i8*, i64)\n");
+    out.push_str("declare i32 @snprintf(i8*, i64, i8*, ...)\n");
+    out.push_str("declare i32 @strcmp(i8*, i8*)\n");
+    out.push_str("declare void @exit(i32)\n");
+    // `read_file`/`write_file`/`arg`/`arg_count` support.
+    out.push_str("declare i8* @fopen(i8*, i8*)\n");
+    out.push_str("declare i64 @fread(i8*, i64, i64, i8*)\n");
+    out.push_str("declare i64 @fwrite(i8*, i64, i64, i8*)\n");
+    out.push_str("declare i32 @fclose(i8*)\n");
+    out.push_str("declare i32 @fseek(i8*, i64, i32)\n");
+    out.push_str("declare i64 @ftell(i8*)\n");
+    // `alloc`/`alloc_n` support -- zero-initializing freshly allocated
+    // memory (see `docs/pointers.md`, "alloc always zero-initializes").
+    out.push_str("declare void @llvm.memset.p0i8.i64(i8*, i8, i64, i1)\n\n");
+    // Stashed by `main` at startup (hosted builds only -- see
+    // `emit_function`'s `is_main` case) so `arg`/`arg_count` can read
+    // them from any function, not just `main` itself. Zero-initialized,
+    // so calling them from a `--freestanding` build (whose `main`, if
+    // any, isn't the C runtime's entry point and never populates these)
+    // harmlessly yields `arg_count() == 0` instead of crashing.
+    out.push_str("@.kite.argc = global i32 0\n");
+    out.push_str("@.kite.argv = global i8** null\n\n");
+
+    if !program.externs.is_empty() {
+        out.push_str("; extern declarations (implemented outside Kite, e.g. in C)\n");
+        for e in &program.externs {
+            let ret = llvm_type(&e.return_type);
+            let params: Vec<String> = e.params.iter().map(llvm_type).collect();
+            let _ = writeln!(out, "declare {ret} @{}({})", e.name, params.join(", "));
+        }
+        out.push('\n');
+    }
+
+    out.push_str(&global_string("@.fmt.int", "%lld\\0A\\00"));
+    out.push_str(&global_string("@.fmt.float", "%f\\0A\\00"));
+    out.push_str(&global_string("@.fmt.str", "%s\\0A\\00"));
+    out.push_str(&global_string("@.fmt.int.raw", "%lld\\00"));
+    out.push_str(&global_string("@.fmt.float.raw", "%g\\00"));
+    out.push_str(&global_string("@.str.true", "true\\00"));
+    out.push_str(&global_string("@.str.false", "false\\00"));
+    out.push_str(&global_string(
+        "@.err.bounds",
+        "kite: index %lld out of range for a list of length %lld (lists are 0-indexed)\\0A\\00",
+    ));
+    out.push_str(&global_string(
+        "@.err.arg",
+        "kite: index %lld out of range for %lld command-line argument(s) (arg() is 0-indexed)\\0A\\00",
+    ));
+    out.push_str(&global_string("@.str.mode.rb", "rb\\00"));
+    out.push_str(&global_string("@.str.mode.wb", "wb\\00"));
+    out.push_str(&global_string("@.str.empty", "\\00"));
+    out.push('\n');
+
+    for func in &program.functions {
+        collect_string_constants(func, &mut ctx);
+    }
+    for (text, name) in &ctx.string_constants {
+        out.push_str(&global_string(name, &escape_llvm_string(text)));
+    }
+    if !ctx.string_constants.is_empty() {
+        out.push('\n');
+    }
+
+    for func in &program.functions {
+        emit_function(func, &mut ctx, options.freestanding, &mut out);
+        out.push('\n');
+    }
+
+    out
+}
+
+#[derive(Default)]
+struct ModuleCtx {
+    string_constants: HashMap<String, String>,
+    next_string_id: u32,
+    structs: HashMap<String, Vec<(String, IrType)>>,
+}
+
+impl ModuleCtx {
+    fn intern_string(&mut self, text: &str) -> String {
+        if let Some(name) = self.string_constants.get(text) {
+            return name.clone();
+        }
+        let name = format!("@.str.{}", self.next_string_id);
+        self.next_string_id += 1;
+        self.string_constants.insert(text.to_string(), name.clone());
+        name
+    }
+}
+
+fn collect_string_constants(func: &IrFunction, ctx: &mut ModuleCtx) {
+    fn visit(v: &IrValue, ctx: &mut ModuleCtx) {
+        if let IrValue::ConstStr(s) = v {
+            ctx.intern_string(s);
+        }
+    }
+    for instr in &func.body {
+        match instr {
+            IrInstr::Store { value, .. } => visit(value, ctx),
+            IrInstr::InitAggregate { values, .. } | IrInstr::ListInit { values, .. } => {
+                for v in values {
+                    visit(v, ctx);
+                }
+            }
+            IrInstr::ListAppend { value, .. } => visit(value, ctx),
+            IrInstr::StrLen { value, .. } => visit(value, ctx),
+            IrInstr::ToStr { value, .. } => visit(value, ctx),
+            IrInstr::CharAt { value, index, .. } => {
+                visit(value, ctx);
+                visit(index, ctx);
+            }
+            IrInstr::Substr {
+                value, start, end, ..
+            } => {
+                visit(value, ctx);
+                visit(start, ctx);
+                visit(end, ctx);
+            }
+            IrInstr::BinOp { lhs, rhs, .. } => {
+                visit(lhs, ctx);
+                visit(rhs, ctx);
+            }
+            IrInstr::Neg { value, .. } | IrInstr::Not { value, .. } => visit(value, ctx),
+            IrInstr::Call { args, .. } | IrInstr::CallAgg { args, .. } => {
+                for (a, _) in args {
+                    visit(a, ctx);
+                }
+            }
+            IrInstr::Print { value, .. } => visit(value, ctx),
+            IrInstr::ListIndexGet { index, .. } => visit(index, ctx),
+            IrInstr::Exit { code } => visit(code, ctx),
+            IrInstr::ListInsert { index, value, .. } => {
+                visit(index, ctx);
+                visit(value, ctx);
+            }
+            IrInstr::ListRemove { index: Some(i), .. } => visit(i, ctx),
+            IrInstr::ListIndexSet { index, value, .. } => {
+                visit(index, ctx);
+                visit(value, ctx);
+            }
+            IrInstr::FieldSet { value, .. } => visit(value, ctx),
+            IrInstr::ListElemAlias { index, .. } => visit(index, ctx),
+            IrInstr::Branch { cond, .. } => visit(cond, ctx),
+            IrInstr::Return(Some((v, _))) => visit(v, ctx),
+            IrInstr::ReadFile { path, .. } => visit(path, ctx),
+            IrInstr::WriteFile { path, content, .. } => {
+                visit(path, ctx);
+                visit(content, ctx);
+            }
+            IrInstr::Arg { index, .. } => visit(index, ctx),
+            _ => {}
+        }
+    }
+}
+
+fn global_string(name: &str, escaped_body_with_null: &str) -> String {
+    let len = llvm_string_byte_len(escaped_body_with_null);
+    format!("{name} = private unnamed_addr constant [{len} x i8] c\"{escaped_body_with_null}\"\n")
+}
+
+fn llvm_string_byte_len(s: &str) -> usize {
+    let chars: Vec<char> = s.chars().collect();
+    let mut i = 0;
+    let mut count = 0;
+    while i < chars.len() {
+        if chars[i] == '\\' && i + 2 < chars.len() {
+            i += 3;
+        } else {
+            i += 1;
+        }
+        count += 1;
+    }
+    count
+}
+
+fn escape_llvm_string(s: &str) -> String {
+    let mut out = String::new();
+    for byte in s.as_bytes() {
+        match *byte {
+            b'"' => out.push_str("\\22"),
+            b'\\' => out.push_str("\\5C"),
+            0x20..=0x7E => out.push(*byte as char),
+            _ => {
+                let _ = write!(out, "\\{byte:02X}");
+            }
+        }
+    }
+    out.push_str("\\00");
+    out
+}
+
+fn string_byte_len_with_nul(s: &str) -> usize {
+    s.len() + 1
+}
+
+struct FnCtx<'a> {
+    ctx: &'a ModuleCtx,
+    locals: HashMap<String, IrType>,
+    /// Every `alloca` is hoisted into the entry block (so locals created
+    /// inside loops never grow the stack).
+    allocas: String,
+}
+
+fn emit_function(func: &IrFunction, ctx: &mut ModuleCtx, freestanding: bool, out: &mut String) {
+    // In hosted mode, `main` is wrapped to the C runtime's expected
+    // `int main()` ABI (see `emit_instr`'s `Return` handling below). In
+    // `--freestanding` mode there is no C runtime calling it -- the
+    // embedding kernel/OS calls Kite functions directly with whatever
+    // signature they actually declare -- so `main` is just an ordinary
+    // function like any other.
+    let is_main = func.name == "main" && !freestanding;
+    let llvm_ret_ty = if is_main {
+        "i32".to_string()
+    } else {
+        llvm_type(&func.return_type)
+    };
+    let sret_param: Option<String> = func
+        .sret
+        .as_ref()
+        .map(|t| format!("{}* %__ret", llvm_type(t)));
+
+    let params_sig: Vec<String> = if is_main {
+        // Accept the C runtime's real `argc`/`argv` here (rather than
+        // emitting a no-argument `i32 @main()`) so `arg`/`arg_count` --
+        // callable from *any* function, not just `main` -- have
+        // something to read. They're stashed into `@.kite.argc`/
+        // `@.kite.argv` below rather than threaded through as
+        // parameters, since Kite functions can't take/return
+        // aggregates (or extra hidden ones) yet -- see
+        // `docs/architecture.md`.
+        vec!["i32 %argc".to_string(), "i8** %argv".to_string()]
+    } else {
+        sret_param
+            .into_iter()
+            .chain(
+                func.params
+                    .iter()
+                    .map(|p| format!("{} %{}", llvm_type(&p.ty), p.name)),
+            )
+            .collect()
+    };
+
+    let _ = writeln!(
+        out,
+        "define {} @{}({}) {{",
+        llvm_ret_ty,
+        func.name,
+        params_sig.join(", ")
+    );
+    out.push_str("entry:\n");
+    let mut body_out = String::new();
+    if is_main {
+        body_out.push_str("  store i32 %argc, i32* @.kite.argc\n");
+        body_out.push_str("  store i8** %argv, i8*** @.kite.argv\n");
+    }
+
+    let mut fctx = FnCtx {
+        ctx,
+        locals: HashMap::new(),
+        allocas: String::new(),
+    };
+    for instr in &func.body {
+        emit_instr(instr, &mut fctx, is_main, &mut body_out);
+    }
+    out.push_str(&fctx.allocas);
+    out.push_str(&body_out);
+
+    out.push_str("}\n");
+}
+
+fn llvm_type(ty: &IrType) -> String {
+    match ty {
+        IrType::I64 => "i64".to_string(),
+        IrType::F64 => "double".to_string(),
+        IrType::Bool => "i1".to_string(),
+        IrType::Str => "i8*".to_string(),
+        IrType::Void => "void".to_string(),
+        IrType::List(elem) => format!("{{ i64, i64, {}* }}", llvm_type(elem)),
+        IrType::Tuple(elems) => format!(
+            "{{ {} }}",
+            elems.iter().map(llvm_type).collect::<Vec<_>>().join(", ")
+        ),
+        IrType::StructRef(name) => format!("%{name}"),
+        IrType::Ptr(inner) => format!("{}*", llvm_type(inner)),
+    }
+}
+
+fn emit_instr(instr: &IrInstr, fctx: &mut FnCtx, is_main: bool, out: &mut String) {
+    match instr {
+        IrInstr::Alloca { name, ty } => {
+            fctx.locals.insert(name.clone(), ty.clone());
+            let decl = format!("  %{name} = alloca {}\n", llvm_type(ty));
+            // The same variable may be declared in several branches; one
+            // hoisted slot serves them all.
+            if !fctx.allocas.contains(&decl) {
+                fctx.allocas.push_str(&decl);
+            }
+        }
+        IrInstr::PtrCast {
+            dest,
+            src,
+            from_ty,
+            to_ty,
+        } => {
+            let (v, _) = emit_value(src, fctx, &IrType::Ptr(Box::new(from_ty.clone())), out);
+            let _ = writeln!(
+                out,
+                "  %.t{dest} = bitcast {}* {v} to {}*",
+                llvm_type(from_ty),
+                llvm_type(to_ty)
+            );
+        }
+        IrInstr::BindParam { name, ty } => {
+            fctx.locals.insert(name.clone(), ty.clone());
+        }
+        IrInstr::RetAgg { name, ty } => {
+            let lty = llvm_type(ty);
+            let v = fresh_reg_name();
+            let _ = writeln!(out, "  {v} = load {lty}, {lty}* %{name}");
+            let _ = writeln!(out, "  store {lty} {v}, {lty}* %__ret");
+            let _ = writeln!(out, "  ret void");
+        }
+        IrInstr::CallAgg {
+            target,
+            name,
+            args,
+            ret_ty,
+        } => {
+            let mut arg_strs = vec![format!("{}* %{target}", llvm_type(ret_ty))];
+            for (a, ty) in args {
+                let (s, _) = emit_value(a, fctx, ty, out);
+                arg_strs.push(format!("{} {s}", llvm_type(ty)));
+            }
+            let _ = writeln!(out, "  call void @{name}({})", arg_strs.join(", "));
+        }
+        IrInstr::Store { name, value } => {
+            let ty = fctx.locals.get(name).cloned().unwrap_or(IrType::I64);
+            let lty = llvm_type(&ty);
+            let (val_str, _) = emit_value(value, fctx, &ty, out);
+            let _ = writeln!(out, "  store {lty} {val_str}, {lty}* %{name}");
+        }
+        IrInstr::Load { dest, name, ty } => {
+            let lty = llvm_type(ty);
+            let _ = writeln!(out, "  %.t{dest} = load {lty}, {lty}* %{name}");
+        }
+        IrInstr::InitAggregate { name, values, .. } => {
+            let ty = fctx.locals.get(name).cloned().unwrap_or(IrType::Void);
+            let lty = llvm_type(&ty);
+            let elem_tys = match &ty {
+                IrType::Tuple(tys) => tys.clone(),
+                IrType::StructRef(n) => fctx
+                    .ctx
+                    .structs
+                    .get(n)
+                    .map(|f| f.iter().map(|(_, t)| t.clone()).collect())
+                    .unwrap_or_default(),
+                _ => vec![],
+            };
+            for (i, value) in values.iter().enumerate() {
+                let field_ty = elem_tys.get(i).cloned().unwrap_or(IrType::I64);
+                let (val_str, _) = emit_value(value, fctx, &field_ty, out);
+                let field_lty = llvm_type(&field_ty);
+                let ptr = fresh_ptr_name();
+                let _ = writeln!(
+                    out,
+                    "  {ptr} = getelementptr inbounds {lty}, {lty}* %{name}, i32 0, i32 {i}"
+                );
+                let _ = writeln!(out, "  store {field_lty} {val_str}, {field_lty}* {ptr}");
+            }
+        }
+        IrInstr::ListInit {
+            name,
+            elem_ty,
+            values,
+        } => emit_list_init(name, elem_ty, values, fctx, out),
+        IrInstr::ListAppend {
+            base,
+            value,
+            elem_ty,
+        } => emit_list_append(base, value, elem_ty, fctx, out),
+        IrInstr::Exit { code } => {
+            let (v, _) = emit_value(code, fctx, &IrType::I64, out);
+            let c32 = fresh_reg_name();
+            let _ = writeln!(out, "  {c32} = trunc i64 {v} to i32");
+            let _ = writeln!(out, "  call void @exit(i32 {c32})");
+        }
+        IrInstr::ListClear { base, elem_ty } => {
+            let ety = llvm_type(elem_ty);
+            let header_ty = format!("{{ i64, i64, {ety}* }}");
+            let lp = fresh_ptr_name();
+            let _ = writeln!(out, "  {lp} = getelementptr inbounds {header_ty}, {header_ty}* %{base}, i32 0, i32 0");
+            let _ = writeln!(out, "  store i64 0, i64* {lp}");
+        }
+        IrInstr::ListRemove {
+            dest,
+            base,
+            index,
+            elem_ty,
+        } => {
+            let ety = llvm_type(elem_ty);
+            let header_ty = format!("{{ i64, i64, {ety}* }}");
+            let lp = fresh_ptr_name();
+            let len = fresh_reg_name();
+            let _ = writeln!(out, "  {lp} = getelementptr inbounds {header_ty}, {header_ty}* %{base}, i32 0, i32 0");
+            let _ = writeln!(out, "  {len} = load i64, i64* {lp}");
+            // Index (default: last element), bounds-checked via the
+            // shared element-pointer helper.
+            let idx_val = match index {
+                Some(v) => v.clone(),
+                None => {
+                    let last = fresh_reg_name();
+                    let _ = writeln!(out, "  {last} = sub i64 {len}, 1");
+                    // Wrap the register in a temp-like constant string via ConstInt is
+                    // impossible; use `pop` on empty = bounds failure through index -1.
+                    IrValue::Param(last.trim_start_matches('%').to_string())
+                }
+            };
+            let ep = emit_list_bounds_checked_ptr(base, &idx_val, elem_ty, fctx, out);
+            let (idx_str, _) = emit_value(&idx_val, fctx, &IrType::I64, out);
+            let _ = writeln!(out, "  %.t{dest} = load {ety}, {ety}* {ep}");
+            // memmove the tail down by one element.
+            let one = emit_sizeof(&ety, out);
+            let next = fresh_ptr_name();
+            let rest = fresh_reg_name();
+            let rest_n = fresh_reg_name();
+            let bytes = fresh_reg_name();
+            let dst8 = fresh_ptr_name();
+            let src8 = fresh_ptr_name();
+            let _ = writeln!(out, "  {next} = getelementptr inbounds {ety}, {ety}* {ep}, i64 1");
+            let _ = writeln!(out, "  {rest} = sub i64 {len}, {idx_str}");
+            let _ = writeln!(out, "  {rest_n} = sub i64 {rest}, 1");
+            let _ = writeln!(out, "  {bytes} = mul i64 {rest_n}, {one}");
+            let _ = writeln!(out, "  {dst8} = bitcast {ety}* {ep} to i8*");
+            let _ = writeln!(out, "  {src8} = bitcast {ety}* {next} to i8*");
+            let _ = writeln!(out, "  call i8* @memmove(i8* {dst8}, i8* {src8}, i64 {bytes})");
+            let nl = fresh_reg_name();
+            let _ = writeln!(out, "  {nl} = sub i64 {len}, 1");
+            let _ = writeln!(out, "  store i64 {nl}, i64* {lp}");
+        }
+        IrInstr::ListInsert {
+            base,
+            index,
+            value,
+            elem_ty,
+        } => {
+            // Grow by appending a copy of the value first (reuses the
+            // growth path), then rotate it into place.
+            emit_list_append(base, value, elem_ty, fctx, out);
+            let ety = llvm_type(elem_ty);
+            let header_ty = format!("{{ i64, i64, {ety}* }}");
+            let lp = fresh_ptr_name();
+            let len = fresh_reg_name();
+            let _ = writeln!(out, "  {lp} = getelementptr inbounds {header_ty}, {header_ty}* %{base}, i32 0, i32 0");
+            let _ = writeln!(out, "  {len} = load i64, i64* {lp}");
+            let dp = fresh_ptr_name();
+            let data = fresh_reg_name();
+            let _ = writeln!(out, "  {dp} = getelementptr inbounds {header_ty}, {header_ty}* %{base}, i32 0, i32 2");
+            let _ = writeln!(out, "  {data} = load {ety}*, {ety}** {dp}");
+            let (idx, _) = emit_value(index, fctx, &IrType::I64, out);
+            let last_i = fresh_reg_name();
+            let lastp = fresh_ptr_name();
+            let tmp = fresh_reg_name();
+            let _ = writeln!(out, "  {last_i} = sub i64 {len}, 1");
+            let _ = writeln!(out, "  {lastp} = getelementptr inbounds {ety}, {ety}* {data}, i64 {last_i}");
+            let _ = writeln!(out, "  {tmp} = load {ety}, {ety}* {lastp}");
+            let at = fresh_ptr_name();
+            let at8 = fresh_ptr_name();
+            let nx = fresh_ptr_name();
+            let nx8 = fresh_ptr_name();
+            let n = fresh_reg_name();
+            let one = emit_sizeof(&ety, out);
+            let bytes = fresh_reg_name();
+            let _ = writeln!(out, "  {at} = getelementptr inbounds {ety}, {ety}* {data}, i64 {idx}");
+            let _ = writeln!(out, "  {nx} = getelementptr inbounds {ety}, {ety}* {at}, i64 1");
+            let _ = writeln!(out, "  {n} = sub i64 {last_i}, {idx}");
+            let _ = writeln!(out, "  {bytes} = mul i64 {n}, {one}");
+            let _ = writeln!(out, "  {at8} = bitcast {ety}* {at} to i8*");
+            let _ = writeln!(out, "  {nx8} = bitcast {ety}* {nx} to i8*");
+            let _ = writeln!(out, "  call i8* @memmove(i8* {nx8}, i8* {at8}, i64 {bytes})");
+            let _ = writeln!(out, "  store {ety} {tmp}, {ety}* {at}");
+        }
+        IrInstr::ListLen { dest, base } => {
+            let elem_ty = match fctx.locals.get(base) {
+                Some(IrType::List(e)) => (**e).clone(),
+                _ => IrType::I64,
+            };
+            let ety = llvm_type(&elem_ty);
+            let header_ty = format!("{{ i64, i64, {ety}* }}");
+            let len_ptr = fresh_ptr_name();
+            let _ = writeln!(out, "  {len_ptr} = getelementptr inbounds {header_ty}, {header_ty}* %{base}, i32 0, i32 0");
+            let _ = writeln!(out, "  %.t{dest} = load i64, i64* {len_ptr}");
+        }
+        IrInstr::StrLen { dest, value } => {
+            let (v, _) = emit_value(value, fctx, &IrType::Str, out);
+            let _ = writeln!(out, "  %.t{dest} = call i64 @strlen(i8* {v})");
+        }
+        IrInstr::ToStr { dest, value, src_ty } => {
+            let buf = fresh_ptr_name();
+            match src_ty {
+                IrType::Bool => {
+                    let (v, _) = emit_value(value, fctx, &IrType::Bool, out);
+                    let _ = writeln!(
+                        out,
+                        "  %.t{dest} = select i1 {v}, i8* getelementptr inbounds ([5 x i8], [5 x i8]* @.str.true, i64 0, i64 0), i8* getelementptr inbounds ([6 x i8], [6 x i8]* @.str.false, i64 0, i64 0)"
+                    );
+                }
+                IrType::F64 => {
+                    let (v, _) = emit_value(value, fctx, &IrType::F64, out);
+                    let _ = writeln!(out, "  {buf} = call i8* @malloc(i64 48)");
+                    let fmt = fresh_ptr_name();
+                    let _ = writeln!(out, "  {fmt} = getelementptr inbounds [3 x i8], [3 x i8]* @.fmt.float.raw, i64 0, i64 0");
+                    let _ = writeln!(out, "  call i32 (i8*, i64, i8*, ...) @snprintf(i8* {buf}, i64 48, i8* {fmt}, double {v})");
+                    let _ = writeln!(out, "  %.t{dest} = bitcast i8* {buf} to i8*");
+                }
+                _ => {
+                    let (v, _) = emit_value(value, fctx, &IrType::I64, out);
+                    let _ = writeln!(out, "  {buf} = call i8* @malloc(i64 32)");
+                    let fmt = fresh_ptr_name();
+                    let _ = writeln!(out, "  {fmt} = getelementptr inbounds [5 x i8], [5 x i8]* @.fmt.int.raw, i64 0, i64 0");
+                    let _ = writeln!(out, "  call i32 (i8*, i64, i8*, ...) @snprintf(i8* {buf}, i64 32, i8* {fmt}, i64 {v})");
+                    let _ = writeln!(out, "  %.t{dest} = bitcast i8* {buf} to i8*");
+                }
+            }
+        }
+        IrInstr::CharAt { dest, value, index } => {
+            let (v, _) = emit_value(value, fctx, &IrType::Str, out);
+            let (idx0, _) = emit_value(index, fctx, &IrType::I64, out);
+            let ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {ptr} = getelementptr inbounds i8, i8* {v}, i64 {idx0}"
+            );
+            let byte = fresh_reg_name();
+            let _ = writeln!(out, "  {byte} = load i8, i8* {ptr}");
+            let _ = writeln!(out, "  %.t{dest} = zext i8 {byte} to i64");
+        }
+        IrInstr::Substr {
+            dest,
+            value,
+            start,
+            end,
+        } => {
+            let (v, _) = emit_value(value, fctx, &IrType::Str, out);
+            let (s0, _) = emit_value(start, fctx, &IrType::I64, out);
+            let (e, _) = emit_value(end, fctx, &IrType::I64, out);
+
+            // Half-open, 0-based, matching Python's `s[start:end]`.
+            let len = fresh_reg_name();
+            let _ = writeln!(out, "  {len} = sub i64 {e}, {s0}");
+            let alloc_len = fresh_reg_name();
+            let _ = writeln!(out, "  {alloc_len} = add i64 {len}, 1");
+            let raw = fresh_ptr_name();
+            let _ = writeln!(out, "  {raw} = call i8* @malloc(i64 {alloc_len})");
+            let src_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {src_ptr} = getelementptr inbounds i8, i8* {v}, i64 {s0}"
+            );
+            let _ = writeln!(
+                out,
+                "  call i8* @memcpy(i8* {raw}, i8* {src_ptr}, i64 {len})"
+            );
+            let nul_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {nul_ptr} = getelementptr inbounds i8, i8* {raw}, i64 {len}"
+            );
+            let _ = writeln!(out, "  store i8 0, i8* {nul_ptr}");
+            let _ = writeln!(out, "  %.t{dest} = bitcast i8* {raw} to i8*");
+        }
+        IrInstr::ReadFile { dest, path } => {
+            let (p, _) = emit_value(path, fctx, &IrType::Str, out);
+            let slot = fresh_ptr_name();
+            let _ = writeln!(out, "  {slot} = alloca i8*");
+            let mode_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {mode_ptr} = getelementptr inbounds [3 x i8], [3 x i8]* @.str.mode.rb, i64 0, i64 0"
+            );
+            let fp = fresh_ptr_name();
+            let _ = writeln!(out, "  {fp} = call i8* @fopen(i8* {p}, i8* {mode_ptr})");
+            let is_null = fresh_reg_name();
+            let _ = writeln!(out, "  {is_null} = icmp eq i8* {fp}, null");
+            let fail_label = fresh_block_label("readfile.fail");
+            let ok_label = fresh_block_label("readfile.ok");
+            let after_label = fresh_block_label("readfile.after");
+            let _ = writeln!(
+                out,
+                "  br i1 {is_null}, label %{fail_label}, label %{ok_label}"
+            );
+
+            let _ = writeln!(out, "{fail_label}:");
+            let empty_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {empty_ptr} = getelementptr inbounds [1 x i8], [1 x i8]* @.str.empty, i64 0, i64 0"
+            );
+            let _ = writeln!(out, "  store i8* {empty_ptr}, i8** {slot}");
+            let _ = writeln!(out, "  br label %{after_label}");
+
+            let _ = writeln!(out, "{ok_label}:");
+            let _ = writeln!(out, "  call i32 @fseek(i8* {fp}, i64 0, i32 2)");
+            let size = fresh_reg_name();
+            let _ = writeln!(out, "  {size} = call i64 @ftell(i8* {fp})");
+            let _ = writeln!(out, "  call i32 @fseek(i8* {fp}, i64 0, i32 0)");
+            let alloc_len = fresh_reg_name();
+            let _ = writeln!(out, "  {alloc_len} = add i64 {size}, 1");
+            let buf = fresh_ptr_name();
+            let _ = writeln!(out, "  {buf} = call i8* @malloc(i64 {alloc_len})");
+            let _ = writeln!(
+                out,
+                "  call i64 @fread(i8* {buf}, i64 1, i64 {size}, i8* {fp})"
+            );
+            let end_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {end_ptr} = getelementptr inbounds i8, i8* {buf}, i64 {size}"
+            );
+            let _ = writeln!(out, "  store i8 0, i8* {end_ptr}");
+            let _ = writeln!(out, "  call i32 @fclose(i8* {fp})");
+            let _ = writeln!(out, "  store i8* {buf}, i8** {slot}");
+            let _ = writeln!(out, "  br label %{after_label}");
+
+            let _ = writeln!(out, "{after_label}:");
+            let _ = writeln!(out, "  %.t{dest} = load i8*, i8** {slot}");
+        }
+        IrInstr::WriteFile {
+            dest,
+            path,
+            content,
+        } => {
+            let (p, _) = emit_value(path, fctx, &IrType::Str, out);
+            let (c, _) = emit_value(content, fctx, &IrType::Str, out);
+            let slot = fresh_ptr_name();
+            let _ = writeln!(out, "  {slot} = alloca i1");
+            let mode_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {mode_ptr} = getelementptr inbounds [3 x i8], [3 x i8]* @.str.mode.wb, i64 0, i64 0"
+            );
+            let fp = fresh_ptr_name();
+            let _ = writeln!(out, "  {fp} = call i8* @fopen(i8* {p}, i8* {mode_ptr})");
+            let is_null = fresh_reg_name();
+            let _ = writeln!(out, "  {is_null} = icmp eq i8* {fp}, null");
+            let fail_label = fresh_block_label("writefile.fail");
+            let ok_label = fresh_block_label("writefile.ok");
+            let after_label = fresh_block_label("writefile.after");
+            let _ = writeln!(
+                out,
+                "  br i1 {is_null}, label %{fail_label}, label %{ok_label}"
+            );
+
+            let _ = writeln!(out, "{fail_label}:");
+            let _ = writeln!(out, "  store i1 false, i1* {slot}");
+            let _ = writeln!(out, "  br label %{after_label}");
+
+            let _ = writeln!(out, "{ok_label}:");
+            let content_len = fresh_reg_name();
+            let _ = writeln!(out, "  {content_len} = call i64 @strlen(i8* {c})");
+            let written = fresh_reg_name();
+            let _ = writeln!(
+                out,
+                "  {written} = call i64 @fwrite(i8* {c}, i64 1, i64 {content_len}, i8* {fp})"
+            );
+            let _ = writeln!(out, "  call i32 @fclose(i8* {fp})");
+            let succeeded = fresh_reg_name();
+            let _ = writeln!(out, "  {succeeded} = icmp eq i64 {written}, {content_len}");
+            let _ = writeln!(out, "  store i1 {succeeded}, i1* {slot}");
+            let _ = writeln!(out, "  br label %{after_label}");
+
+            let _ = writeln!(out, "{after_label}:");
+            let _ = writeln!(out, "  %.t{dest} = load i1, i1* {slot}");
+        }
+        IrInstr::ArgCount { dest } => {
+            let raw = fresh_reg_name();
+            let _ = writeln!(out, "  {raw} = load i32, i32* @.kite.argc");
+            let widened = fresh_reg_name();
+            let _ = writeln!(out, "  {widened} = sext i32 {raw} to i64");
+            // `arg_count()` doesn't count `argv[0]` (the program's own
+            // path) -- see the doc comment on `IrInstr::ArgCount`.
+            let _ = writeln!(out, "  %.t{dest} = sub i64 {widened}, 1");
+        }
+        IrInstr::Arg { dest, index } => {
+            let (idx_val, _) = emit_value(index, fctx, &IrType::I64, out);
+            let argc_raw = fresh_reg_name();
+            let _ = writeln!(out, "  {argc_raw} = load i32, i32* @.kite.argc");
+            let argc = fresh_reg_name();
+            let _ = writeln!(out, "  {argc} = sext i32 {argc_raw} to i64");
+            let user_argc = fresh_reg_name();
+            let _ = writeln!(out, "  {user_argc} = sub i64 {argc}, 1");
+
+            let too_small = fresh_reg_name();
+            let _ = writeln!(out, "  {too_small} = icmp slt i64 {idx_val}, 0");
+            let too_big = fresh_reg_name();
+            let _ = writeln!(out, "  {too_big} = icmp sge i64 {idx_val}, {user_argc}");
+            let out_of_range = fresh_reg_name();
+            let _ = writeln!(out, "  {out_of_range} = or i1 {too_small}, {too_big}");
+
+            let ok_label = fresh_block_label("arg.ok");
+            let fail_label = fresh_block_label("arg.fail");
+            let _ = writeln!(
+                out,
+                "  br i1 {out_of_range}, label %{fail_label}, label %{ok_label}"
+            );
+
+            let _ = writeln!(out, "{fail_label}:");
+            let err_len = string_byte_len_with_nul(
+                "kite: index %lld out of range for %lld command-line argument(s) (arg() is 0-indexed)\n",
+            );
+            let fmt_ptr = fresh_ptr_name();
+            let _ = writeln!(out, "  {fmt_ptr} = getelementptr inbounds [{err_len} x i8], [{err_len} x i8]* @.err.arg, i64 0, i64 0");
+            let _ = writeln!(
+                out,
+                "  call i32 (i8*, ...) @printf(i8* {fmt_ptr}, i64 {idx_val}, i64 {user_argc})"
+            );
+            let _ = writeln!(out, "  call void @exit(i32 1)");
+            let _ = writeln!(out, "  unreachable");
+
+            let _ = writeln!(out, "{ok_label}:");
+            let argv = fresh_ptr_name();
+            let _ = writeln!(out, "  {argv} = load i8**, i8*** @.kite.argv");
+            // `argv[0]` is the program's own path (not counted), so a
+            // 0-based `arg(i)` reads `argv[i + 1]`.
+            let argv_index = fresh_reg_name();
+            let _ = writeln!(out, "  {argv_index} = add i64 {idx_val}, 1");
+            let elem_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {elem_ptr} = getelementptr inbounds i8*, i8** {argv}, i64 {argv_index}"
+            );
+            let _ = writeln!(out, "  %.t{dest} = load i8*, i8** {elem_ptr}");
+        }
+        IrInstr::Alloc { dest, pointee_ty } => {
+            let lty = llvm_type(pointee_ty);
+            let size = emit_sizeof(&lty, out);
+            let raw = fresh_ptr_name();
+            let _ = writeln!(out, "  {raw} = call i8* @malloc(i64 {size})");
+            let _ = writeln!(
+                out,
+                "  call void @llvm.memset.p0i8.i64(i8* {raw}, i8 0, i64 {size}, i1 false)"
+            );
+            let _ = writeln!(out, "  %.t{dest} = bitcast i8* {raw} to {lty}*");
+        }
+        IrInstr::AllocN {
+            dest,
+            pointee_ty,
+            count,
+        } => {
+            let lty = llvm_type(pointee_ty);
+            let elem_size = emit_sizeof(&lty, out);
+            let (count_val, _) = emit_value(count, fctx, &IrType::I64, out);
+            let total_size = fresh_reg_name();
+            let _ = writeln!(out, "  {total_size} = mul i64 {elem_size}, {count_val}");
+            let raw = fresh_ptr_name();
+            let _ = writeln!(out, "  {raw} = call i8* @malloc(i64 {total_size})");
+            let _ = writeln!(
+                out,
+                "  call void @llvm.memset.p0i8.i64(i8* {raw}, i8 0, i64 {total_size}, i1 false)"
+            );
+            let _ = writeln!(out, "  %.t{dest} = bitcast i8* {raw} to {lty}*");
+        }
+        IrInstr::Free { ptr, pointee_ty } => {
+            let lty = llvm_type(pointee_ty);
+            let ptr_ty = IrType::Ptr(Box::new(pointee_ty.clone()));
+            let (p, _) = emit_value(ptr, fctx, &ptr_ty, out);
+            let as_i8 = fresh_ptr_name();
+            let _ = writeln!(out, "  {as_i8} = bitcast {lty}* {p} to i8*");
+            let _ = writeln!(out, "  call void @free(i8* {as_i8})");
+        }
+        IrInstr::PtrLoad {
+            dest,
+            ptr,
+            pointee_ty,
+        } => {
+            let lty = llvm_type(pointee_ty);
+            let ptr_ty = IrType::Ptr(Box::new(pointee_ty.clone()));
+            let (p, _) = emit_value(ptr, fctx, &ptr_ty, out);
+            let _ = writeln!(out, "  %.t{dest} = load {lty}, {lty}* {p}");
+        }
+        IrInstr::PtrStore {
+            ptr,
+            value,
+            pointee_ty,
+        } => {
+            let lty = llvm_type(pointee_ty);
+            let ptr_ty = IrType::Ptr(Box::new(pointee_ty.clone()));
+            let (p, _) = emit_value(ptr, fctx, &ptr_ty, out);
+            let (v, _) = emit_value(value, fctx, pointee_ty, out);
+            let _ = writeln!(out, "  store {lty} {v}, {lty}* {p}");
+        }
+        IrInstr::AddrOf { dest, name } => {
+            let local_ty = fctx
+                .locals
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| panic!("`&{name}`: unknown local (compiler bug)"));
+            let lty = llvm_type(&local_ty);
+            // `%name` is already the address (every local scalar is
+            // `alloca`'d, i.e. addressable, for its whole lifetime) --
+            // this is a no-op bitcast that just gives `&x` its own SSA
+            // name to be used from here on.
+            let _ = writeln!(out, "  %.t{dest} = bitcast {lty}* %{name} to {lty}*");
+        }
+        IrInstr::PtrOffset {
+            dest,
+            ptr,
+            offset,
+            pointee_ty,
+            negate,
+        } => {
+            let lty = llvm_type(pointee_ty);
+            let ptr_ty = IrType::Ptr(Box::new(pointee_ty.clone()));
+            let (p, _) = emit_value(ptr, fctx, &ptr_ty, out);
+            let (off, _) = emit_value(offset, fctx, &IrType::I64, out);
+            let off = if *negate {
+                let negated = fresh_reg_name();
+                let _ = writeln!(out, "  {negated} = sub i64 0, {off}");
+                negated
+            } else {
+                off
+            };
+            let _ = writeln!(
+                out,
+                "  %.t{dest} = getelementptr {lty}, {lty}* {p}, i64 {off}"
+            );
+        }
+        IrInstr::PtrEq {
+            dest,
+            lhs,
+            rhs,
+            pointee_ty,
+            negate,
+        } => {
+            let ptr_ty = IrType::Ptr(Box::new(pointee_ty.clone()));
+            let lty = llvm_type(&ptr_ty);
+            let (l, _) = emit_value(lhs, fctx, &ptr_ty, out);
+            let (r, _) = emit_value(rhs, fctx, &ptr_ty, out);
+            let mnemonic = if *negate { "ne" } else { "eq" };
+            let _ = writeln!(out, "  %.t{dest} = icmp {mnemonic} {lty} {l}, {r}");
+        }
+        IrInstr::BinOp { dest, op, lhs, rhs } => emit_binop(*dest, *op, lhs, rhs, fctx, out),
+        IrInstr::Neg { dest, value, ty } => {
+            let (v, _) = emit_value(value, fctx, ty, out);
+            match ty {
+                IrType::F64 => {
+                    let _ = writeln!(out, "  %.t{dest} = fneg double {v}");
+                }
+                _ => {
+                    let _ = writeln!(out, "  %.t{dest} = sub i64 0, {v}");
+                }
+            }
+        }
+        IrInstr::Not { dest, value } => {
+            let (v, _) = emit_value(value, fctx, &IrType::Bool, out);
+            let _ = writeln!(out, "  %.t{dest} = xor i1 {v}, true");
+        }
+        IrInstr::Call {
+            dest,
+            name,
+            args,
+            ret_ty,
+        } => {
+            let mut arg_strs = Vec::new();
+            for (a, ty) in args {
+                let (s, _) = emit_value(a, fctx, ty, out);
+                arg_strs.push(format!("{} {s}", llvm_type(ty)));
+            }
+            let rty = llvm_type(ret_ty);
+            match dest {
+                Some(d) => {
+                    let _ = writeln!(out, "  %.t{d} = call {rty} @{name}({})", arg_strs.join(", "));
+                }
+                None => {
+                    let _ = writeln!(out, "  call {rty} @{name}({})", arg_strs.join(", "));
+                }
+            }
+        }
+        IrInstr::Print { value, arg_ty } => emit_print(value, arg_ty, fctx, out),
+        IrInstr::ListIndexGet {
+            dest,
+            base,
+            index,
+            elem_ty,
+        } => {
+            let data_ptr = emit_list_bounds_checked_ptr(base, index, elem_ty, fctx, out);
+            let ety = llvm_type(elem_ty);
+            let _ = writeln!(out, "  %.t{dest} = load {ety}, {ety}* {data_ptr}");
+        }
+        IrInstr::ListIndexSet {
+            base,
+            index,
+            value,
+            elem_ty,
+        } => {
+            let data_ptr = emit_list_bounds_checked_ptr(base, index, elem_ty, fctx, out);
+            let ety = llvm_type(elem_ty);
+            let (val_str, _) = emit_value(value, fctx, elem_ty, out);
+            let _ = writeln!(out, "  store {ety} {val_str}, {ety}* {data_ptr}");
+        }
+        IrInstr::FieldGet {
+            dest,
+            base,
+            layout_name,
+            position,
+            field_ty,
+        } => {
+            let agg_lty = field_base_llvm_type(layout_name);
+            let ptr = fresh_ptr_name();
+            let _ = writeln!(out, "  {ptr} = getelementptr inbounds {agg_lty}, {agg_lty}* %{base}, i32 0, i32 {position}");
+            let fty = llvm_type(field_ty);
+            let _ = writeln!(out, "  %.t{dest} = load {fty}, {fty}* {ptr}");
+        }
+        IrInstr::PtrAlias {
+            name,
+            ptr_local,
+            struct_ty,
+        } => {
+            fctx.locals.insert(name.clone(), struct_ty.clone());
+            let sty = llvm_type(struct_ty);
+            let _ = writeln!(out, "  %{name} = load {sty}*, {sty}** %{ptr_local}");
+        }
+        IrInstr::FieldAlias {
+            name,
+            base,
+            layout_name,
+            position,
+            field_ty,
+        } => {
+            fctx.locals.insert(name.clone(), field_ty.clone());
+            let agg_lty = field_base_llvm_type(layout_name);
+            let _ = writeln!(out, "  %{name} = getelementptr inbounds {agg_lty}, {agg_lty}* %{base}, i32 0, i32 {position}");
+        }
+        IrInstr::ListElemAlias {
+            name,
+            base,
+            index,
+            elem_ty,
+        } => {
+            fctx.locals.insert(name.clone(), elem_ty.clone());
+            let p = emit_list_bounds_checked_ptr(base, index, elem_ty, fctx, out);
+            let ety = llvm_type(elem_ty);
+            let _ = writeln!(out, "  %{name} = bitcast {ety}* {p} to {ety}*");
+        }
+        IrInstr::FieldSet {
+            base,
+            layout_name,
+            position,
+            value,
+            field_ty,
+        } => {
+            let agg_lty = field_base_llvm_type(layout_name);
+            let (val_str, _) = emit_value(value, fctx, field_ty, out);
+            let ptr = fresh_ptr_name();
+            let _ = writeln!(out, "  {ptr} = getelementptr inbounds {agg_lty}, {agg_lty}* %{base}, i32 0, i32 {position}");
+            let fty = llvm_type(field_ty);
+            let _ = writeln!(out, "  store {fty} {val_str}, {fty}* {ptr}");
+        }
+        IrInstr::Label(name) => {
+            let _ = writeln!(out, "{}:", sanitize_label(name));
+        }
+        IrInstr::Jump(target) => {
+            let _ = writeln!(out, "  br label %{}", sanitize_label(target));
+        }
+        IrInstr::Branch {
+            cond,
+            then_label,
+            else_label,
+        } => {
+            let (c, _) = emit_value(cond, fctx, &IrType::Bool, out);
+            let _ = writeln!(
+                out,
+                "  br i1 {c}, label %{}, label %{}",
+                sanitize_label(then_label),
+                sanitize_label(else_label)
+            );
+        }
+        IrInstr::Return(value) => {
+            if is_main {
+                match value {
+                    Some((v, _)) => {
+                        let (val, _) = emit_value(v, fctx, &IrType::I64, out);
+                        let _ = writeln!(out, "  ret i32 {val}");
+                    }
+                    None => {
+                        let _ = writeln!(out, "  ret i32 0");
+                    }
+                }
+            } else {
+                match value {
+                    Some((v, ty)) => {
+                        let (val, _) = emit_value(v, fctx, ty, out);
+                        let _ = writeln!(out, "  ret {} {val}", llvm_type(ty));
+                    }
+                    None => {
+                        let _ = writeln!(out, "  ret void");
+                    }
+                }
+            }
+        }
+        IrInstr::Unreachable => out.push_str("  unreachable\n"),
+        IrInstr::NoteLayout { .. } => {}
+    }
+}
+
+fn field_base_llvm_type(layout: &FieldBaseTy) -> String {
+    match layout {
+        FieldBaseTy::Struct(name) => format!("%{name}"),
+        FieldBaseTy::Tuple(tys) => format!(
+            "{{ {} }}",
+            tys.iter().map(llvm_type).collect::<Vec<_>>().join(", ")
+        ),
+    }
+}
+
+/// Allocates a heap buffer for a list literal's elements and initializes
+/// the 3-word header (`len`, `cap`, `data`) pointed to by `name`.
+fn emit_list_init(
+    name: &str,
+    elem_ty: &IrType,
+    values: &[IrValue],
+    fctx: &mut FnCtx,
+    out: &mut String,
+) {
+    let ety = llvm_type(elem_ty);
+    let n = values.len();
+    let header_ty = format!("{{ i64, i64, {ety}* }}");
+
+    let raw_ptr = fresh_ptr_name();
+    let one_size = emit_sizeof(&ety, out);
+    let total_bytes = fresh_reg_name();
+    let _ = writeln!(out, "  {total_bytes} = mul i64 {one_size}, {}", n.max(1));
+    let _ = writeln!(out, "  {raw_ptr} = call i8* @malloc(i64 {total_bytes})");
+    let data_ptr = fresh_ptr_name();
+    let _ = writeln!(out, "  {data_ptr} = bitcast i8* {raw_ptr} to {ety}*");
+
+    for (i, value) in values.iter().enumerate() {
+        let (val_str, _) = emit_value(value, fctx, elem_ty, out);
+        let elem_ptr = fresh_ptr_name();
+        let _ = writeln!(
+            out,
+            "  {elem_ptr} = getelementptr inbounds {ety}, {ety}* {data_ptr}, i64 {i}"
+        );
+        let _ = writeln!(out, "  store {ety} {val_str}, {ety}* {elem_ptr}");
+    }
+
+    let len_ptr = fresh_ptr_name();
+    let _ = writeln!(
+        out,
+        "  {len_ptr} = getelementptr inbounds {header_ty}, {header_ty}* %{name}, i32 0, i32 0"
+    );
+    let _ = writeln!(out, "  store i64 {n}, i64* {len_ptr}");
+    let cap_ptr = fresh_ptr_name();
+    let _ = writeln!(
+        out,
+        "  {cap_ptr} = getelementptr inbounds {header_ty}, {header_ty}* %{name}, i32 0, i32 1"
+    );
+    let _ = writeln!(out, "  store i64 {n}, i64* {cap_ptr}");
+    let data_field_ptr = fresh_ptr_name();
+    let _ = writeln!(out, "  {data_field_ptr} = getelementptr inbounds {header_ty}, {header_ty}* %{name}, i32 0, i32 2");
+    let _ = writeln!(out, "  store {ety}* {data_ptr}, {ety}** {data_field_ptr}");
+}
+
+/// `append(list, value)`: grows the heap buffer (doubling capacity, or
+/// starting at capacity 1) if `len == cap`, then writes `value` at the
+/// end and increments `len`.
+fn emit_list_append(
+    base: &str,
+    value: &IrValue,
+    elem_ty: &IrType,
+    fctx: &mut FnCtx,
+    out: &mut String,
+) {
+    let ety = llvm_type(elem_ty);
+    let header_ty = format!("{{ i64, i64, {ety}* }}");
+    let elem_size = emit_sizeof(&ety, out);
+
+    let len_ptr = fresh_ptr_name();
+    let _ = writeln!(
+        out,
+        "  {len_ptr} = getelementptr inbounds {header_ty}, {header_ty}* %{base}, i32 0, i32 0"
+    );
+    let cap_ptr = fresh_ptr_name();
+    let _ = writeln!(
+        out,
+        "  {cap_ptr} = getelementptr inbounds {header_ty}, {header_ty}* %{base}, i32 0, i32 1"
+    );
+    let data_field_ptr = fresh_ptr_name();
+    let _ = writeln!(out, "  {data_field_ptr} = getelementptr inbounds {header_ty}, {header_ty}* %{base}, i32 0, i32 2");
+
+    let len_reg = fresh_reg_name();
+    let _ = writeln!(out, "  {len_reg} = load i64, i64* {len_ptr}");
+    let cap_reg = fresh_reg_name();
+    let _ = writeln!(out, "  {cap_reg} = load i64, i64* {cap_ptr}");
+
+    let needs_grow = fresh_reg_name();
+    let _ = writeln!(out, "  {needs_grow} = icmp sge i64 {len_reg}, {cap_reg}");
+    let grow_label = fresh_block_label("append.grow");
+    let after_label = fresh_block_label("append.after");
+    let _ = writeln!(
+        out,
+        "  br i1 {needs_grow}, label %{grow_label}, label %{after_label}"
+    );
+
+    let _ = writeln!(out, "{grow_label}:");
+    let old_data_reg = fresh_reg_name();
+    let _ = writeln!(
+        out,
+        "  {old_data_reg} = load {ety}*, {ety}** {data_field_ptr}"
+    );
+    let one_if_zero = fresh_reg_name();
+    let _ = writeln!(out, "  {one_if_zero} = icmp eq i64 {cap_reg}, 0");
+    let doubled = fresh_reg_name();
+    let _ = writeln!(out, "  {doubled} = mul i64 {cap_reg}, 2");
+    let new_cap = fresh_reg_name();
+    let _ = writeln!(
+        out,
+        "  {new_cap} = select i1 {one_if_zero}, i64 1, i64 {doubled}"
+    );
+    let new_bytes = fresh_reg_name();
+    let _ = writeln!(out, "  {new_bytes} = mul i64 {new_cap}, {elem_size}");
+    let new_raw = fresh_ptr_name();
+    let _ = writeln!(out, "  {new_raw} = call i8* @malloc(i64 {new_bytes})");
+    let new_data = fresh_ptr_name();
+    let _ = writeln!(out, "  {new_data} = bitcast i8* {new_raw} to {ety}*");
+    let old_bytes = fresh_reg_name();
+    let _ = writeln!(out, "  {old_bytes} = mul i64 {len_reg}, {elem_size}");
+    let old_data_i8 = fresh_ptr_name();
+    let _ = writeln!(
+        out,
+        "  {old_data_i8} = bitcast {ety}* {old_data_reg} to i8*"
+    );
+    let _ = writeln!(
+        out,
+        "  call i8* @memcpy(i8* {new_raw}, i8* {old_data_i8}, i64 {old_bytes})"
+    );
+    let _ = writeln!(out, "  call void @free(i8* {old_data_i8})");
+    let _ = writeln!(out, "  store {ety}* {new_data}, {ety}** {data_field_ptr}");
+    let _ = writeln!(out, "  store i64 {new_cap}, i64* {cap_ptr}");
+    let _ = writeln!(out, "  br label %{after_label}");
+
+    let _ = writeln!(out, "{after_label}:");
+    let data_reg = fresh_reg_name();
+    let _ = writeln!(out, "  {data_reg} = load {ety}*, {ety}** {data_field_ptr}");
+    let (val_str, _) = emit_value(value, fctx, elem_ty, out);
+    let write_ptr = fresh_ptr_name();
+    let _ = writeln!(
+        out,
+        "  {write_ptr} = getelementptr inbounds {ety}, {ety}* {data_reg}, i64 {len_reg}"
+    );
+    let _ = writeln!(out, "  store {ety} {val_str}, {ety}* {write_ptr}");
+    let new_len = fresh_reg_name();
+    let _ = writeln!(out, "  {new_len} = add i64 {len_reg}, 1");
+    let _ = writeln!(out, "  store i64 {new_len}, i64* {len_ptr}");
+}
+
+/// Computes and bounds-checks a 1-based list index at runtime, aborting
+/// via `printf` + `exit(1)` on failure, and returns a pointer to the
+/// element.
+fn emit_list_bounds_checked_ptr(
+    base: &str,
+    index: &IrValue,
+    elem_ty: &IrType,
+    fctx: &mut FnCtx,
+    out: &mut String,
+) -> String {
+    let ety = llvm_type(elem_ty);
+    let header_ty = format!("{{ i64, i64, {ety}* }}");
+
+    let (idx_val, _) = emit_value(index, fctx, &IrType::I64, out);
+    let len_ptr = fresh_ptr_name();
+    let _ = writeln!(
+        out,
+        "  {len_ptr} = getelementptr inbounds {header_ty}, {header_ty}* %{base}, i32 0, i32 0"
+    );
+    let len_reg = fresh_reg_name();
+    let _ = writeln!(out, "  {len_reg} = load i64, i64* {len_ptr}");
+
+    let too_small = fresh_reg_name();
+    let _ = writeln!(out, "  {too_small} = icmp slt i64 {idx_val}, 0");
+    let too_big = fresh_reg_name();
+    let _ = writeln!(out, "  {too_big} = icmp sge i64 {idx_val}, {len_reg}");
+    let out_of_range = fresh_reg_name();
+    let _ = writeln!(out, "  {out_of_range} = or i1 {too_small}, {too_big}");
+
+    let ok_label = fresh_block_label("idx.ok");
+    let fail_label = fresh_block_label("idx.fail");
+    let _ = writeln!(
+        out,
+        "  br i1 {out_of_range}, label %{fail_label}, label %{ok_label}"
+    );
+
+    let _ = writeln!(out, "{fail_label}:");
+    let err_len = string_byte_len_with_nul(
+        "kite: index %lld out of range for a list of length %lld (lists are 0-indexed)\n",
+    );
+    let fmt_ptr = fresh_ptr_name();
+    let _ = writeln!(out, "  {fmt_ptr} = getelementptr inbounds [{err_len} x i8], [{err_len} x i8]* @.err.bounds, i64 0, i64 0");
+    let _ = writeln!(
+        out,
+        "  call i32 (i8*, ...) @printf(i8* {fmt_ptr}, i64 {idx_val}, i64 {len_reg})"
+    );
+    let _ = writeln!(out, "  call void @exit(i32 1)");
+    let _ = writeln!(out, "  unreachable");
+
+    let _ = writeln!(out, "{ok_label}:");
+    let data_ptr = fresh_ptr_name();
+    let data_field_ptr = fresh_ptr_name();
+    let _ = writeln!(out, "  {data_field_ptr} = getelementptr inbounds {header_ty}, {header_ty}* %{base}, i32 0, i32 2");
+    let _ = writeln!(out, "  {data_ptr} = load {ety}*, {ety}** {data_field_ptr}");
+    let elem_ptr = fresh_ptr_name();
+    let _ = writeln!(
+        out,
+        "  {elem_ptr} = getelementptr inbounds {ety}, {ety}* {data_ptr}, i64 {idx_val}"
+    );
+    elem_ptr
+}
+
+fn emit_value(
+    value: &IrValue,
+    fctx: &mut FnCtx,
+    expected_ty: &IrType,
+    out: &mut String,
+) -> (String, IrType) {
+    match value {
+        IrValue::ConstInt(0)
+            if matches!(
+                expected_ty,
+                IrType::List(_) | IrType::Tuple(_) | IrType::StructRef(_)
+            ) =>
+        {
+            ("zeroinitializer".to_string(), expected_ty.clone())
+        }
+        IrValue::ConstInt(0) if matches!(expected_ty, IrType::Ptr(_) | IrType::Str) => {
+            ("null".to_string(), expected_ty.clone())
+        }
+        IrValue::ConstInt(v) => (v.to_string(), IrType::I64),
+        IrValue::ConstFloat(v) => (format_llvm_float(*v), IrType::F64),
+        IrValue::ConstBool(v) => (
+            (if *v { "true" } else { "false" }).to_string(),
+            IrType::Bool,
+        ),
+        IrValue::ConstNull(pointee_ty) => ("null".to_string(), IrType::Ptr(pointee_ty.clone())),
+        IrValue::ConstStr(s) => {
+            let name = fctx
+                .ctx
+                .string_constants
+                .get(s)
+                .cloned()
+                .unwrap_or_default();
+            let len = string_byte_len_with_nul(s);
+            let tmp = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {tmp} = getelementptr inbounds [{len} x i8], [{len} x i8]* {name}, i64 0, i64 0"
+            );
+            (tmp, IrType::Str)
+        }
+        IrValue::Param(name) => (format!("%{name}"), expected_ty.clone()),
+        IrValue::Local(name) => {
+            let ty = fctx
+                .locals
+                .get(name)
+                .cloned()
+                .unwrap_or_else(|| expected_ty.clone());
+            let lty = llvm_type(&ty);
+            let tmp = fresh_reg_name();
+            let _ = writeln!(out, "  {tmp} = load {lty}, {lty}* %{name}");
+            (tmp, ty)
+        }
+        IrValue::Temp(t) => (format!("%.t{t}"), expected_ty.clone()),
+    }
+}
+
+fn emit_print(value: &IrValue, ty: &IrType, fctx: &mut FnCtx, out: &mut String) {
+    match ty {
+        IrType::I64 => {
+            let (v, _) = emit_value(value, fctx, &IrType::I64, out);
+            let fmt_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {fmt_ptr} = getelementptr inbounds [6 x i8], [6 x i8]* @.fmt.int, i64 0, i64 0"
+            );
+            let _ = writeln!(out, "  call i32 (i8*, ...) @printf(i8* {fmt_ptr}, i64 {v})");
+        }
+        IrType::F64 => {
+            let (v, _) = emit_value(value, fctx, &IrType::F64, out);
+            let fmt_ptr = fresh_ptr_name();
+            let _ = writeln!(out, "  {fmt_ptr} = getelementptr inbounds [4 x i8], [4 x i8]* @.fmt.float, i64 0, i64 0");
+            let _ = writeln!(
+                out,
+                "  call i32 (i8*, ...) @printf(i8* {fmt_ptr}, double {v})"
+            );
+        }
+        IrType::Bool => {
+            let (v, _) = emit_value(value, fctx, &IrType::Bool, out);
+            let sel = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {sel} = select i1 {v}, i8* getelementptr inbounds ([5 x i8], [5 x i8]* @.str.true, i64 0, i64 0), i8* getelementptr inbounds ([6 x i8], [6 x i8]* @.str.false, i64 0, i64 0)"
+            );
+            let fmt_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {fmt_ptr} = getelementptr inbounds [4 x i8], [4 x i8]* @.fmt.str, i64 0, i64 0"
+            );
+            let _ = writeln!(
+                out,
+                "  call i32 (i8*, ...) @printf(i8* {fmt_ptr}, i8* {sel})"
+            );
+        }
+        IrType::Str => {
+            let (v, _) = emit_value(value, fctx, &IrType::Str, out);
+            let fmt_ptr = fresh_ptr_name();
+            let _ = writeln!(
+                out,
+                "  {fmt_ptr} = getelementptr inbounds [4 x i8], [4 x i8]* @.fmt.str, i64 0, i64 0"
+            );
+            let _ = writeln!(out, "  call i32 (i8*, ...) @printf(i8* {fmt_ptr}, i8* {v})");
+        }
+        _ => {}
+    }
+}
+
+fn emit_binop(
+    dest: Temp,
+    op: IrBinOp,
+    lhs: &IrValue,
+    rhs: &IrValue,
+    fctx: &mut FnCtx,
+    out: &mut String,
+) {
+    use IrBinOp::*;
+    if matches!(op, EqStr | NeStr | LtStr | GtStr | LeStr | GeStr) {
+        let (l, _) = emit_value(lhs, fctx, &IrType::Str, out);
+        let (r, _) = emit_value(rhs, fctx, &IrType::Str, out);
+        let cmp = fresh_reg_name();
+        let _ = writeln!(out, "  {cmp} = call i32 @strcmp(i8* {l}, i8* {r})");
+        let mnemonic = match op {
+            EqStr => "eq",
+            NeStr => "ne",
+            LtStr => "slt",
+            GtStr => "sgt",
+            LeStr => "sle",
+            _ => "sge",
+        };
+        let _ = writeln!(out, "  %.t{dest} = icmp {mnemonic} i32 {cmp}, 0");
+        return;
+    }
+    if op == ConcatStr {
+        // `l ++ r` (surfaced to Kite as `l + r` on two strings): malloc a
+        // fresh buffer sized for both operands plus a NUL terminator,
+        // memcpy each piece in, and null-terminate. `strlen`/`malloc`/
+        // `memcpy` are already declared for `print`/list-growth, so this
+        // needs no new runtime support.
+        let (l, _) = emit_value(lhs, fctx, &IrType::Str, out);
+        let (r, _) = emit_value(rhs, fctx, &IrType::Str, out);
+        let l_len = fresh_reg_name();
+        let r_len = fresh_reg_name();
+        let total = fresh_reg_name();
+        let total_plus_one = fresh_reg_name();
+        let tail = fresh_ptr_name();
+        let end = fresh_ptr_name();
+        let _ = writeln!(out, "  {l_len} = call i64 @strlen(i8* {l})");
+        let _ = writeln!(out, "  {r_len} = call i64 @strlen(i8* {r})");
+        let _ = writeln!(out, "  {total} = add i64 {l_len}, {r_len}");
+        let _ = writeln!(out, "  {total_plus_one} = add i64 {total}, 1");
+        let _ = writeln!(out, "  %.t{dest} = call i8* @malloc(i64 {total_plus_one})");
+        let _ = writeln!(
+            out,
+            "  call i8* @memcpy(i8* %.t{dest}, i8* {l}, i64 {l_len})"
+        );
+        let _ = writeln!(
+            out,
+            "  {tail} = getelementptr inbounds i8, i8* %.t{dest}, i64 {l_len}"
+        );
+        let _ = writeln!(out, "  call i8* @memcpy(i8* {tail}, i8* {r}, i64 {r_len})");
+        let _ = writeln!(
+            out,
+            "  {end} = getelementptr inbounds i8, i8* %.t{dest}, i64 {total}"
+        );
+        let _ = writeln!(out, "  store i8 0, i8* {end}");
+        return;
+    }
+    let ty = binop_operand_type(op);
+    let (l, _) = emit_value(lhs, fctx, &ty, out);
+    let (r, _) = emit_value(rhs, fctx, &ty, out);
+    let mnemonic = binop_mnemonic(op);
+    let lty = llvm_type(&ty);
+    let _ = writeln!(out, "  %.t{dest} = {mnemonic} {lty} {l}, {r}");
+}
+
+fn binop_operand_type(op: IrBinOp) -> IrType {
+    use IrBinOp::*;
+    match op {
+        AddI | SubI | MulI | DivI | RemI | EqI | NeI | LtI | GtI | LeI | GeI => IrType::I64,
+        AddF | SubF | MulF | DivF | EqF | NeF | LtF | GtF | LeF | GeF => IrType::F64,
+        EqStr | NeStr | LtStr | GtStr | LeStr | GeStr | ConcatStr => IrType::Str,
+        AndI | OrI | XorI | ShlI | ShrI => IrType::I64,
+    }
+}
+
+fn binop_mnemonic(op: IrBinOp) -> &'static str {
+    use IrBinOp::*;
+    match op {
+        AddI => "add",
+        SubI => "sub",
+        MulI => "mul",
+        DivI => "sdiv",
+        RemI => "srem",
+        EqI => "icmp eq",
+        NeI => "icmp ne",
+        LtI => "icmp slt",
+        GtI => "icmp sgt",
+        LeI => "icmp sle",
+        GeI => "icmp sge",
+        AddF => "fadd",
+        SubF => "fsub",
+        MulF => "fmul",
+        DivF => "fdiv",
+        EqF => "fcmp oeq",
+        NeF => "fcmp one",
+        LtF => "fcmp olt",
+        GtF => "fcmp ogt",
+        LeF => "fcmp ole",
+        GeF => "fcmp oge",
+        EqStr | NeStr | LtStr | GtStr | LeStr | GeStr | ConcatStr => {
+            unreachable!("handled separately in emit_binop")
+        }
+        AndI => "and",
+        OrI => "or",
+        XorI => "xor",
+        ShlI => "shl",
+        ShrI => "ashr",
+    }
+}
+
+fn elem_byte_size(ty: &IrType) -> usize {
+    match ty {
+        IrType::I64 | IrType::F64 | IrType::Str => 8,
+        IrType::Bool => 1,
+        _ => 8,
+    }
+}
+
+fn format_llvm_float(v: f64) -> String {
+    if v.fract() == 0.0 && v.is_finite() {
+        format!("{v:.1}")
+    } else {
+        format!("{v}")
+    }
+}
+
+fn sanitize_label(label: &str) -> String {
+    label.replace('.', "_")
+}
+
+use std::cell::Cell;
+thread_local! {
+    static REG_COUNTER: Cell<u32> = const { Cell::new(0) };
+}
+
+/// `sizeof(T)` in bytes, for `alloc`/`alloc_n` -- the standard
+/// target-independent LLVM trick: index one past a null pointer of the
+/// type and see what address that lands on.
+fn emit_sizeof(llvm_pointee_ty: &str, out: &mut String) -> String {
+    let size_ptr = fresh_ptr_name();
+    let size = fresh_reg_name();
+    let _ = writeln!(
+        out,
+        "  {size_ptr} = getelementptr {llvm_pointee_ty}, {llvm_pointee_ty}* null, i32 1"
+    );
+    let _ = writeln!(
+        out,
+        "  {size} = ptrtoint {llvm_pointee_ty}* {size_ptr} to i64"
+    );
+    size
+}
+
+fn fresh_reg_name() -> String {
+    REG_COUNTER.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        format!("%.r{v}")
+    })
+}
+
+fn fresh_ptr_name() -> String {
+    REG_COUNTER.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        format!("%.p{v}")
+    })
+}
+
+fn fresh_block_label(hint: &str) -> String {
+    REG_COUNTER.with(|c| {
+        let v = c.get();
+        c.set(v + 1);
+        format!("{hint}.{v}")
+    })
+}

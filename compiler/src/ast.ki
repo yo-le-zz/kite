@@ -1,0 +1,148 @@
+// The Kite AST as an arena of uniform nodes.
+//
+// Every node is (kind, text, span, kids). Node ids are indexes into
+// `Ast.nodes`; -1 means "absent" (an `Option::None` child).
+//
+// Layouts (kids, in order):
+//   Program        ""      [List imports, List structs, List enums, List functions]
+//   ImportModule   path    []
+//   ImportItems    path    [Name...]
+//   Struct         name    [Name base | -1, List fields]
+//   Field          name    [Type]
+//   Enum           name    [List variants]
+//   Variant        name    [Field...]
+//   Function       name    [List params, Type ret | -1, Flags, Block body | -1]
+//   Flags          "extern"/"async"/"extern async"/""   []
+//   Param          name    [Type, default expr | -1, Flags("variadic" or "")]
+//   Block          ""      [stmt...]
+//   Assign         ""      [lvalue, Type | -1, value]
+//   LIdent name [] | LField field [base] | LIndex "" [base, index] | LDeref "" [target]
+//   ExprStmt       ""      [expr]
+//   Match          ""      [subject, List arms, Block else | -1]
+//   Arm            variant [Name binds..., Block body]   (binds first, body last)
+//   Unpack         ""      [List names, value]
+//   Return         ""      [expr | -1]
+//   Break / Continue
+//   If             ""      [cond, Block then, List orifs, Block else | -1]
+//   Orif           ""      [cond, Block]
+//   Until / While  ""      [cond, Block]
+//   Infinit / Thread ""    [Block]
+//   ForRange       var     [start, end, Block]
+//   ForEach        var     [iterable, Block]
+//   Try            failed_var [Block try, Block failed | -1, Block finally | -1]
+//   Expressions: Int Float Bool Str Ident Null, ListLit, TupleLit,
+//   DictLit [Entry key [value]...], Index [base, idx], Field field [base],
+//   Unary op [expr], Binary op [lhs, rhs], Call name [args], MethodCall name
+//   [recv, args...], Named name [value], Await [expr], Alloc [Type],
+//   AllocN [Type, count], EmptyList [Type]
+
+use diag
+
+type Node:
+    kind: string
+    text: string
+    span: Span
+    kids: [int]
+
+class Ast:
+    nodes: [Node]
+
+    make addl(self, kind: string, text: string, span: Span, kids: [int]) -> int:
+        n = Node()
+        n.kind = kind
+        n.text = text
+        n.span = span
+        n.kids = kids
+        append(self.nodes, n)
+        return len(self.nodes) - 1
+
+    make add0(self, kind: string, text: string, span: Span) -> int:
+        k: [int] = []
+        return self.addl(kind, text, span, k)
+
+    make add1(self, kind: string, text: string, span: Span, a: int) -> int:
+        return self.addl(kind, text, span, [a])
+
+    make add2(self, kind: string, text: string, span: Span, a: int, b: int) -> int:
+        return self.addl(kind, text, span, [a, b])
+
+    make add3(self, kind: string, text: string, span: Span, a: int, b: int, c: int) -> int:
+        return self.addl(kind, text, span, [a, b, c])
+
+    make add4(self, kind: string, text: string, span: Span, a: int, b: int, c: int, d: int) -> int:
+        return self.addl(kind, text, span, [a, b, c, d])
+
+    make span_of(self, id: int) -> Span:
+        return self.nodes[id].span
+
+    make kind_of(self, id: int) -> string:
+        return self.nodes[id].kind
+
+    make text_of(self, id: int) -> string:
+        return self.nodes[id].text
+
+    make kid(self, id: int, i: int) -> int:
+        return self.nodes[id].kids[i]
+
+    make nkids(self, id: int) -> int:
+        return len(self.nodes[id].kids)
+
+// ---- canonical text dump (compared against the Rust compiler) -------------
+
+make dump_quote(s: string) -> string:
+    out = "\""
+    i = 0
+    while i < len(s):
+        c = char_at(s, i)
+        if c == 34:
+            out = out + "\\\""
+        orif c == 92:
+            out = out + "\\\\"
+        orif c == 10:
+            out = out + "\\n"
+        orif c == 9:
+            out = out + "\\t"
+        orif c == 13:
+            out = out + "\\r"
+        else:
+            out = out + substr(s, i, i + 1)
+        i += 1
+    return out + "\""
+
+// Normalize numeric literal text like the Rust dumper (`007` -> `7`,
+// `2.50` -> `2.5`, `3.0` stays `3.0`).
+make norm_int(s: string) -> string:
+    i = 0
+    while i < len(s) - 1 and char_at(s, i) == 48:
+        i += 1
+    return substr(s, i, len(s))
+
+make norm_float(s: string) -> string:
+    dot = find(s, ".")
+    if dot < 0:
+        return s
+    ip = norm_int(substr(s, 0, dot))
+    frac = substr(s, dot + 1, len(s))
+    end = len(frac)
+    while end > 1 and char_at(frac, end - 1) == 48:
+        end -= 1
+    return ip + "." + substr(frac, 0, end)
+
+make dump_node(ast: Ast, id: int, depth: int) -> string:
+    if id < 0:
+        return "nil"
+    n = ast.nodes[id]
+    sp = n.span
+    text = n.text
+    if n.kind == "Int":
+        text = norm_int(text)
+    orif n.kind == "Float":
+        text = norm_float(text)
+    shown = "@" + str(sp.line) + ":" + str(sp.col) + ":" + str(sp.start) + "-" + str(sp.end)
+    k0 = n.kind
+    if k0 == "List" or k0 == "Flags" or k0 == "Name" or k0 == "Program" or k0 == "Entry" or k0 == "Type" or k0 == "VField":
+        shown = "@-"
+    out = "(" + n.kind + " " + dump_quote(text) + " " + shown
+    for k in n.kids:
+        out = out + " " + dump_node(ast, k, depth + 1)
+    return out + ")"

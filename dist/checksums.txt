@@ -1,2 +1,0 @@
-c0eee31d34fafa5904ed06e8dd2a3da0337d5f7913e7f5c7e6cd6c3de262d115  kite-0.2.0-linux-arm64-musl.tar.gz
-d1ae77dd10137b1913aad0eefc9d2ad7c61dced0a6efe158dbf7c49c414f3bd6  kite-0.2.0-windows-x64.zip

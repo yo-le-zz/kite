@@ -1,0 +1,11 @@
+// Thin runtime layer over libc (stderr, processes, exit).
+
+extern make write(fd: int, buf: string, n: int) -> int
+extern make system(cmd: string) -> int
+
+make eprint(s: string):
+    write(2, s, len(s))
+
+make eprint_line(s: string):
+    write(2, s, len(s))
+    write(2, "\n", 1)

@@ -1,0 +1,49 @@
+// kitec -- the Kite compiler written in Kite.
+use rt
+use diag
+use lexer
+use ast
+use parser
+
+make read_source(path: string) -> string:
+    return read_file(path)
+
+make cmd_tokens(path: string):
+    src = read_source(path)
+    diags = Diags()
+    toks = lex(src, diags)
+    emit_diags(diags, path, src)
+    for t in toks:
+        text = t.text
+        if t.kind == "IntLiteral":
+            text = norm_int(text)
+        orif t.kind == "FloatLiteral":
+            text = norm_float(text)
+        print(f"{t.kind} {dump_quote(text)} {t.ival} @{t.span.line}:{t.span.col}:{t.span.start}-{t.span.end}")
+
+make cmd_ast(path: string):
+    src = read_source(path)
+    diags = Diags()
+    toks = lex(src, diags)
+    ast = Ast()
+    root = -1
+    if not diags.had_errors():
+        root = parse_tokens(toks, ast, diags)
+    if diags.had_errors():
+        emit_diags(diags, path, src)
+        exit(1)
+    print(dump_node(ast, root, 0))
+
+make main():
+    if arg_count() < 2:
+        eprint_line("usage: kitec tokens|ast FILE")
+        exit(2)
+    cmd = arg(0)
+    path = arg(1)
+    if cmd == "tokens":
+        cmd_tokens(path)
+    orif cmd == "ast":
+        cmd_ast(path)
+    else:
+        eprint_line("kitec: unknown command `" + cmd + "`")
+        exit(2)

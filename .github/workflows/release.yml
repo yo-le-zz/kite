@@ -1,0 +1,44 @@
+name: release
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  deb:
+    strategy:
+      matrix:
+        include:
+          - { os: ubuntu-latest, arch: amd64 }
+          - { os: ubuntu-24.04-arm, arch: arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - run: sudo apt-get update && sudo apt-get install -y clang
+      - run: scripts/package.sh deb ${{ matrix.arch }}
+      - uses: actions/upload-artifact@v4
+        with: { name: "deb-${{ matrix.arch }}", path: dist/*.deb }
+
+  windows:
+    strategy:
+      matrix:
+        include:
+          - { os: windows-latest, arch: x64 }
+          - { os: windows-11-arm, arch: arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: build
+        shell: bash
+        run: |
+          cd archive/rust-stage0 && cargo build --release
+          mkdir -p ../../dist/pkg && cp target/release/kite.exe ../../dist/pkg/
+          cp ../../scripts/install.ps1 ../../dist/pkg/ 2>/dev/null || true
+          cp ../../README.md ../../LICENSE ../../dist/pkg/ 2>/dev/null || true
+      - name: zip
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path archive/rust-stage0/Cargo.toml -Pattern '^version\s*=\s*"(.*)"').Matches[0].Groups[1].Value
+          Compress-Archive -Path dist/pkg/* -DestinationPath "dist/kite-$v-windows-${{ matrix.arch }}.zip"
+      - uses: actions/upload-artifact@v4
+        with: { name: "windows-${{ matrix.arch }}", path: dist/*.zip }

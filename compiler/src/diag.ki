@@ -1,0 +1,136 @@
+// Diagnostics: source spans and error reporting (port of src/diagnostics.rs).
+
+type Span:
+    start: int
+    end: int
+    line: int
+    col: int
+
+make span_new(start: int, end: int, line: int, col: int) -> Span:
+    s = Span()
+    s.start = start
+    s.end = end
+    s.line = line
+    s.col = col
+    return s
+
+make span_dummy() -> Span:
+    return span_new(0, 0, 0, 0)
+
+// Merge two spans: covers both, keeps the first one's line/column.
+make span_to(a: Span, b: Span) -> Span:
+    s = Span()
+    s.start = min(a.start, b.start)
+    s.end = max(a.end, b.end)
+    s.line = a.line
+    s.col = a.col
+    return s
+
+type Diag:
+    code: string
+    title: string
+    span: Span
+    label: string
+    help: string
+    file: string
+    source: string
+    has_file: bool
+
+class Diags:
+    items: [Diag]
+
+    make add(self, code: string, title: string, span: Span, label: string = "", help: string = ""):
+        d = Diag()
+        d.code = code
+        d.title = title
+        d.span = span
+        d.label = label
+        d.help = help
+        append(self.items, d)
+
+    make had_errors(self) -> bool:
+        return len(self.items) > 0
+
+    make is_empty(self) -> bool:
+        return len(self.items) == 0
+
+    make extend(self, other: Diags):
+        for d in other.items:
+            append(self.items, d)
+
+    // Tag every diagnostic that has no file yet with `filename`/`source`.
+    make retag_file(self, filename: string, source: string):
+        i = 0
+        while i < len(self.items):
+            if not self.items[i].has_file:
+                self.items[i].file = filename
+                self.items[i].source = source
+                self.items[i].has_file = true
+            i += 1
+
+make gutter_width(line_no: int) -> int:
+    return len(str(line_no))
+
+// The `n`-th (0-based) line of `source`, without its newline.
+make nth_line(source: string, n: int) -> string:
+    start = 0
+    cur = 0
+    i = 0
+    total = len(source)
+    while i <= total:
+        if i == total or char_at(source, i) == 10:
+            if cur == n:
+                end = i
+                if end > start and char_at(source, end - 1) == 13:
+                    end -= 1
+                return substr(source, start, end)
+            cur += 1
+            start = i + 1
+        i += 1
+    return ""
+
+make render_diag(d: Diag, default_file: string, default_source: string) -> string:
+    filename = default_file
+    source = default_source
+    if d.has_file:
+        filename = d.file
+        source = d.source
+    out = "error"
+    if len(d.code) > 0:
+        out = out + "[" + d.code + "]"
+    out = out + ": " + d.title + "\n"
+    line_no = max(d.span.line, 1)
+    gutter = gutter_width(line_no)
+    pad = repeat(" ", gutter)
+    out = out + pad + "--> " + filename + ":" + str(line_no) + ":" + str(d.span.col) + "\n"
+    out = out + pad + " |\n"
+    src_line = nth_line(source, line_no - 1)
+    if line_no - 1 < count_lines(source):
+        out = out + str(line_no) + " | " + src_line + "\n"
+        col = max(d.span.col - 1, 0)
+        width = max(d.span.end - d.span.start, 1)
+        room = max(len(src_line) - col, 1)
+        carets = repeat("^", min(width, room))
+        pointer = pad + " | " + repeat(" ", col) + carets
+        if len(d.label) > 0:
+            pointer = pointer + " " + d.label
+        out = out + pointer + "\n"
+    out = out + pad + " |\n"
+    if len(d.help) > 0:
+        out = out + pad + "= help: " + d.help + "\n"
+    return out
+
+make count_lines(source: string) -> int:
+    if len(source) == 0:
+        return 0
+    n = 1
+    i = 0
+    while i < len(source):
+        if char_at(source, i) == 10 and i + 1 < len(source):
+            n += 1
+        i += 1
+    return n
+
+make emit_diags(ds: Diags, default_file: string, default_source: string):
+    for d in ds.items:
+        eprint(render_diag(d, default_file, default_source) + "\n")
