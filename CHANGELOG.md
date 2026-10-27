@@ -24,3 +24,11 @@
   builds `.deb` (amd64/arm64) and Windows (x64/arm64) packages; release workflow added.
 - Fix: `build.sh` built only the examples (`cargo build --examples`), not the `kite` binary; it now builds `--bins --examples`.
 - `clean.sh` (`--deep`) removes every build output and cache of the repository.
+- Repository cleanup: removed `bootstrap/`, duplicated installer scripts, `scripts/package.sh`; `.gitignore` rewritten.
+- `build.sh` runs the bootstrap stages (stage0 -> stage1 -> stage2) and reports progress (`./build.sh status`).
+- `scripts/package-release.sh`: Linux/Windows archives, `.deb`, checksums; selects the Rust or the self-hosted compiler.
+- Installers (`website/install.sh`, `install-macos.sh`, `install.ps1`): SHA-256 verification, `--version`, `--prefix`,
+  `--deb`, wget fallback, clang detection with install hints, automatic PATH setup.
+- Website refreshed for 0.3.0; CI updated for the new layout and a bootstrap job added.
+- Fix: the Rust crate is self-contained again (own copy of the prelude), so `cross`/Docker builds work; `package-release.sh` now fails clearly when no target could be built.
+- Fix: Windows zip packaging with an absolute --output-dir; partial cross-builds no longer reported as total failure.

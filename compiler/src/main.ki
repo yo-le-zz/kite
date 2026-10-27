@@ -34,7 +34,20 @@ make cmd_ast(path: string):
         exit(1)
     print(dump_node(ast, root, 0))
 
+// Phases of the Rust compiler that have been ported to Kite. `build.sh` reads
+// this to decide how far the bootstrap can go; "build" appears once the whole
+// pipeline (lex -> parse -> desugar -> sema -> ir -> codegen -> driver) exists.
+make capabilities() -> [string]:
+    return ["lexer", "parser", "diagnostics"]
+
 make main():
+    if arg_count() == 1 and arg(0) == "--capabilities":
+        for c in capabilities():
+            print(c)
+        exit(0)
+    if arg_count() == 1 and arg(0) == "--version":
+        print("kitec 0.3.0")
+        exit(0)
     if arg_count() < 2:
         eprint_line("usage: kitec tokens|ast FILE")
         exit(2)

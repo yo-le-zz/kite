@@ -3,7 +3,7 @@
   install.ps1 -- installs the latest (or a pinned) `kite` release on Windows.
 
     irm https://kite-lang.pages.dev/install.ps1 | iex
-    $env:KITE_VERSION="0.2.0"; irm https://kite-lang.pages.dev/install.ps1 | iex
+    $env:KITE_VERSION="0.3.0"; irm https://kite-lang.pages.dev/install.ps1 | iex
     irm https://kite-lang.pages.dev/install.ps1 -OutFile install.ps1; ./install.ps1 -Uninstall
 
   Env / param overrides:
@@ -15,7 +15,8 @@ param(
   [string]$Repo = $(if ($env:KITE_REPO) { $env:KITE_REPO } else { "yo-le-zz/Kite" }),
   [string]$Version = $(if ($env:KITE_VERSION) { $env:KITE_VERSION } else { "" }),
   [string]$InstallDir = $(if ($env:KITE_INSTALL_DIR) { $env:KITE_INSTALL_DIR } else { Join-Path $env:LOCALAPPDATA "Kite\bin" }),
-  [switch]$Uninstall
+  [switch]$Uninstall,
+  [switch]$NoModifyPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -69,6 +70,18 @@ try {
     Write-Die "download failed: $DownloadUrl (does this release cover $Short?)"
   }
 
+  # Verify the SHA-256 against the release's checksums.txt (when published).
+  try {
+    $sums = (Invoke-WebRequest -UseBasicParsing -Uri "https://github.com/$Repo/releases/download/v$Version/checksums.txt").Content
+    $line = ($sums -split "`n" | Where-Object { $_ -match [regex]::Escape($FileName) } | Select-Object -First 1)
+    if ($line) {
+      $want = ($line -split "\s+")[0].ToLower()
+      $have = (Get-FileHash -Algorithm SHA256 $ZipPath).Hash.ToLower()
+      if ($want -ne $have) { Write-Die "checksum mismatch for $FileName (expected $want, got $have)" }
+      Write-Ok "checksum verified"
+    }
+  } catch { Write-Info "no checksums.txt in this release: skipping verification" }
+
   $ExtractDir = Join-Path $TmpDir "extracted"
   Expand-Archive -Path $ZipPath -DestinationPath $ExtractDir -Force
 
@@ -77,16 +90,21 @@ try {
 
   New-Item -ItemType Directory -Path $InstallDir -Force | Out-Null
   Copy-Item $BinPath.FullName (Join-Path $InstallDir "kite.exe") -Force
+  try { & (Join-Path $InstallDir "kite.exe") --version | Out-Null } catch { Write-Host "! the installed binary did not run" -ForegroundColor Yellow }
 
   Write-Ok "kite $Version installed to $InstallDir\kite.exe"
 
   # Add to the *user* PATH (no admin rights needed) if not already present.
   $userPath = [Environment]::GetEnvironmentVariable("Path", "User")
-  if ($userPath -notlike "*$InstallDir*") {
+  if (-not $NoModifyPath -and $userPath -notlike "*$InstallDir*") {
     [Environment]::SetEnvironmentVariable("Path", "$userPath;$InstallDir", "User")
     Write-Info "added $InstallDir to your user PATH -- open a new terminal for it to take effect"
   }
 
+  if (-not (Get-Command clang -ErrorAction SilentlyContinue)) {
+    Write-Host "! clang was not found: kite needs it to build native programs." -ForegroundColor Yellow
+    Write-Host "  install it with:  winget install LLVM.LLVM" -ForegroundColor Yellow
+  }
   Write-Info "run 'kite --version' in a new terminal to confirm the install."
 } finally {
   Remove-Item -Recurse -Force $TmpDir -ErrorAction SilentlyContinue

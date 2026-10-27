@@ -210,3 +210,6 @@ footer a:hover { color: var(--text); }
 @media (prefers-reduced-motion: reduce) {
   * { transition: none !important; }
 }
+
+.badge{display:inline-block;margin-left:.5rem;padding:.1rem .5rem;border-radius:999px;border:1px solid currentColor;font-size:.75em;opacity:.8}
+pre{overflow:auto;padding:1rem;border-radius:8px;background:rgba(127,127,127,.12)}

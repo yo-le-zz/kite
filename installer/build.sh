@@ -112,6 +112,7 @@ ok()   { printf "     %s✔ %s%s\n" "$GREEN" "$1" "$RESET"; }
 warn() { printf "     %s⚠ %s%s\n" "$YELLOW" "$1" "$RESET"; }
 fail() { printf "     %s✘ %s%s\n" "$RED" "$1" "$RESET"; }
 
+START_DIR="$PWD"
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 cd "$ROOT_DIR"
 
@@ -140,6 +141,7 @@ for name in "${WANTED[@]}"; do
 done
 
 TOTAL=${#TARGETS_TO_BUILD[@]}
+case "$OUTPUT_DIR" in /*) ;; *) OUTPUT_DIR="$START_DIR/$OUTPUT_DIR" ;; esac   # always absolute
 mkdir -p "$OUTPUT_DIR"
 rm -f "$OUTPUT_DIR/checksums.txt"
 
@@ -280,7 +282,7 @@ for entry in "${TARGETS_TO_BUILD[@]}"; do
     zip)
       archive_path="$target_out_dir/${archive_base}.zip"
       if command -v zip >/dev/null 2>&1; then
-        (cd "$work_dir" && zip -r -q "$OLDPWD/$archive_path" "$(basename "$stage_dir")")
+        (cd "$work_dir" && zip -r -q "$archive_path" "$(basename "$stage_dir")")
       else
         warn "no 'zip' command found; writing a .tar.gz instead"
         archive_path="$target_out_dir/${archive_base}.tar.gz"

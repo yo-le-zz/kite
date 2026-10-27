@@ -11,8 +11,8 @@ use crate::lexer::lex;
 use crate::parser::parse;
 use std::collections::HashSet;
 
-const CORE: &str = include_str!("../../../stdlib/prelude/core.ki");
-const MAP_TPL: &str = include_str!("../../../stdlib/prelude/map.tpl");
+const CORE: &str = include_str!("prelude/core.ki");
+const MAP_TPL: &str = include_str!("prelude/map.tpl");
 
 fn parse_src(src: &str) -> Option<Program> {
     let (tokens, d) = lex(src);

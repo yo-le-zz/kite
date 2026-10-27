@@ -15,7 +15,7 @@
         <img src="/kite-64.png" alt="" width="40" height="40">
         <span>kite</span>
       </div>
-      <p class="tagline">Compilateur &amp; CLI multiplateforme. Une commande, et c'est installé.</p>
+      <p class="tagline">Lisible comme Python, rapide comme C. Une commande, et c'est installé. <span class="badge">v0.3.0</span></p>
     </header>
 
     <section class="installer" aria-label="Commande d'installation">
@@ -47,8 +47,22 @@
         <li><a href="/install.sh">install.sh</a> — script brut, pour Linux</li>
         <li><a href="/install-macos.sh">install-macos.sh</a> — script brut, pour macOS</li>
         <li><a href="/install.ps1">install.ps1</a> — script brut, pour Windows</li>
-        <li><a href="https://github.com/yo-le-zz/Kite/releases/latest">Releases GitHub</a> — .deb, .zip, binaires bruts pour chaque OS/architecture</li>
+        <li><a href="https://github.com/yo-le-zz/Kite/releases/latest">Releases GitHub</a> — <code>.deb</code> (amd64, arm64), <code>.tar.gz</code> / <code>.zip</code> Linux, macOS, Windows (x64, arm64), <code>checksums.txt</code></li>
+        <li>Debian / Ubuntu : <code>curl -fsSL https://kite-lang.pages.dev/install.sh | sh -s -- --deb</code></li>
       </ul>
+    </section>
+
+    <section class="alt">
+      <h2>Premier programme</h2>
+<pre><code>make main():
+    name = "Kite"
+    print(f"Hello, {name}!")</code></pre>
+      <p class="hint">Enregistre ça dans <code>src/main.ki</code>, puis <code>kite run</code>. Kite a besoin de <code>clang</code> pour produire un exécutable natif.</p>
+    </section>
+
+    <section class="alt">
+      <h2>Le compilateur s'écrit lui-même</h2>
+      <p class="hint">Kite est en cours de réécriture en Kite : le lexer et le parser tournent déjà en Kite et produisent des résultats identiques au compilateur Rust d'origine (conservé comme « stage0 »). Voir <a href="https://github.com/yo-le-zz/Kite/blob/main/docs/bootstrap.md">docs/bootstrap.md</a>.</p>
     </section>
 
     <footer>

@@ -1,44 +1,88 @@
 name: release
+# Builds the release files on native runners and attaches them to the GitHub
+# release of a v* tag. Uses the stable Rust compiler until the bootstrap is complete.
 on:
   push:
     tags: ["v*"]
   workflow_dispatch:
 
 jobs:
-  deb:
+  linux:
     strategy:
       matrix:
         include:
-          - { os: ubuntu-latest, arch: amd64 }
-          - { os: ubuntu-24.04-arm, arch: arm64 }
+          - { os: ubuntu-latest,    short: linux-x64 }
+          - { os: ubuntu-24.04-arm, short: linux-arm64 }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
       - run: sudo apt-get update && sudo apt-get install -y clang
-      - run: scripts/package.sh deb ${{ matrix.arch }}
+      - run: scripts/package-release.sh --targets ${{ matrix.short }}
       - uses: actions/upload-artifact@v4
-        with: { name: "deb-${{ matrix.arch }}", path: dist/*.deb }
+        with: { name: "release-${{ matrix.short }}", path: dist/release/*.* }
 
   windows:
     strategy:
       matrix:
         include:
-          - { os: windows-latest, arch: x64 }
-          - { os: windows-11-arm, arch: arm64 }
+          - { os: windows-latest,  short: windows-x64,   triple: x86_64-pc-windows-msvc }
+          - { os: windows-11-arm,  short: windows-arm64, triple: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - name: build
-        shell: bash
-        run: |
-          cd archive/rust-stage0 && cargo build --release
-          mkdir -p ../../dist/pkg && cp target/release/kite.exe ../../dist/pkg/
-          cp ../../scripts/install.ps1 ../../dist/pkg/ 2>/dev/null || true
-          cp ../../README.md ../../LICENSE ../../dist/pkg/ 2>/dev/null || true
-      - name: zip
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: build and zip
         shell: pwsh
         run: |
-          $v = (Select-String -Path archive/rust-stage0/Cargo.toml -Pattern '^version\s*=\s*"(.*)"').Matches[0].Groups[1].Value
-          Compress-Archive -Path dist/pkg/* -DestinationPath "dist/kite-$v-windows-${{ matrix.arch }}.zip"
+          Set-Location archive/rust-stage0
+          cargo build --release
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.*)"').Matches[0].Groups[1].Value
+          New-Item -ItemType Directory -Force -Path ../../dist/release, ../../stage | Out-Null
+          Copy-Item target/release/kite.exe ../../stage/
+          Copy-Item ../../LICENSE ../../stage/
+          Compress-Archive -Path ../../stage/* -DestinationPath "../../dist/release/kite-$v-${{ matrix.short }}.zip"
+      - name: build and zip the GUI installer
+        shell: pwsh
+        run: |
+          Set-Location installer
+          cargo build --release
+          $iv = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"(.*)"').Matches[0].Groups[1].Value
+          New-Item -ItemType Directory -Force -Path ../stage-installer | Out-Null
+          Copy-Item target/release/Kite-Installer.exe ../stage-installer/kite-installer.exe
+          Compress-Archive -Path ../stage-installer/* -DestinationPath "../dist/release/kite-installer-$iv-${{ matrix.short }}.zip"
       - uses: actions/upload-artifact@v4
-        with: { name: "windows-${{ matrix.arch }}", path: dist/*.zip }
+        with: { name: "release-${{ matrix.short }}", path: dist/release/*.zip }
+
+  macos:
+    strategy:
+      matrix:
+        include:
+          - { os: macos-13,     short: macos-x64 }
+          - { os: macos-latest, short: macos-arm64 }
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - name: build and tar
+        run: |
+          cd archive/rust-stage0 && cargo build --release
+          v=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
+          mkdir -p ../../dist/release stage/kite-$v-${{ matrix.short }}
+          cp target/release/kite stage/kite-$v-${{ matrix.short }}/
+          cp ../../LICENSE stage/kite-$v-${{ matrix.short }}/
+          tar -C stage -czf ../../dist/release/kite-$v-${{ matrix.short }}.tar.gz kite-$v-${{ matrix.short }}
+      - uses: actions/upload-artifact@v4
+        with: { name: "release-${{ matrix.short }}", path: dist/release/*.tar.gz }
+
+  publish:
+    needs: [linux, windows, macos]
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions: { contents: write }
+    steps:
+      - uses: actions/download-artifact@v4
+        with: { path: out, merge-multiple: true }
+      - run: cd out && sha256sum * | grep -v checksums.txt > checksums.txt
+      - uses: softprops/action-gh-release@v2
+        with: { files: out/* }

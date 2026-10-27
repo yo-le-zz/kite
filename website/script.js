@@ -3,17 +3,17 @@
     linux: {
       title: "linux — sh",
       command: "curl -fsSL https://kite-lang.pages.dev/install.sh | sh",
-      hint: 'Installe dans <code>~/.local/bin</code>. Nécessite <code>curl</code> et <code>tar</code>.',
+      hint: 'Installe dans <code>~/.local/bin</code>. Nécessite <code>curl</code> (ou <code>wget</code>) et <code>tar</code>. Option <code>--deb</code> sur Debian/Ubuntu.',
     },
     macos: {
       title: "macos — sh",
       command: "curl -fsSL https://kite-lang.pages.dev/install-macos.sh | sh",
-      hint: 'Installe dans <code>~/.local/bin</code>. Lève automatiquement la quarantaine Gatekeeper.',
+      hint: 'Installe dans <code>~/.local/bin</code>. Lève automatiquement la quarantaine Gatekeeper. Vérifie la somme SHA-256.',
     },
     windows: {
       title: "windows — powershell",
       command: "irm https://kite-lang.pages.dev/install.ps1 | iex",
-      hint: 'Installe dans <code>%LOCALAPPDATA%\\Kite\\bin</code> et l\u2019ajoute au PATH utilisateur.',
+      hint: 'Installe dans <code>%LOCALAPPDATA%\\Kite\\bin</code> et l\u2019ajoute au PATH utilisateur. Installe clang avec <code>winget install LLVM.LLVM</code>.',
     },
   };
 

@@ -15,6 +15,9 @@ jobs:
   test:
     name: fmt, clippy, build & test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
+    defaults:
+      run:
+        working-directory: archive/rust-stage0
     strategy:
       fail-fast: false
       matrix:
@@ -31,6 +34,8 @@ jobs:
 
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: archive/rust-stage0
 
       # `kite` shells out to `clang` to turn its generated LLVM IR into a
       # native executable -- this is what the LLVM backend tests and CLI
@@ -91,6 +96,8 @@ jobs:
 
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: archive/rust-stage0
 
       - name: Install clang
         run: |
@@ -98,14 +105,14 @@ jobs:
           sudo apt-get install -y clang
 
       - name: Build the kite binary
-        run: cargo build --release
+        run: cd archive/rust-stage0 && cargo build --release
 
       - name: kite init
-        run: ./target/release/kite init smoke_test_project
+        run: $GITHUB_WORKSPACE/archive/rust-stage0/target/release/kite init smoke_test_project
 
       - name: kite run
         working-directory: smoke_test_project
-        run: "$GITHUB_WORKSPACE/target/release/kite run | tee output.txt"
+        run: "$GITHUB_WORKSPACE/archive/rust-stage0/target/release/kite run | tee output.txt"
 
       - name: Verify hello-world output
         working-directory: smoke_test_project
@@ -113,7 +120,7 @@ jobs:
 
       - name: kite check on every example program
         run: |
-          KITE="$GITHUB_WORKSPACE/target/release/kite"
+          KITE="$GITHUB_WORKSPACE/archive/rust-stage0/target/release/kite"
           for example in examples/*.ki; do
             echo "== checking $example =="
             mkdir -p /tmp/example_project/src
@@ -152,6 +159,8 @@ jobs:
 
       - name: Cache cargo registry and build artifacts
         uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: archive/rust-stage0
 
       - name: Install clang
         shell: pwsh
@@ -162,16 +171,16 @@ jobs:
           }
 
       - name: Build the kite binary
-        run: cargo build --release
+        run: cd archive/rust-stage0 && cargo build --release
 
       - name: kite init
-        run: .\target\release\kite.exe init smoke_test_project
+        run: .\archive\rust-stage0\target\release\kite.exe init smoke_test_project
 
       - name: kite run
         working-directory: smoke_test_project
         shell: pwsh
         run: |
-          $env:GITHUB_WORKSPACE\target\release\kite.exe run | Tee-Object -FilePath output.txt
+          $env:GITHUB_WORKSPACE\archive\rust-stage0\target\release\kite.exe run | Tee-Object -FilePath output.txt
 
       - name: Verify hello-world output
         working-directory: smoke_test_project
@@ -191,8 +200,22 @@ jobs:
 
       - name: kite build --freestanding produces an object file
         working-directory: smoke_test_project
-        run: .\..\target\release\kite.exe build --freestanding
+        run: .\..\archive\rust-stage0\target\release\kite.exe build --freestanding
 
       - name: kite build --lib produces an object file + C header
         working-directory: smoke_test_project
-        run: .\..\target\release\kite.exe build --lib
+        run: .\..\archive\rust-stage0\target\release\kite.exe build --lib
+
+  # The bootstrap: Rust stage0 builds the Kite compiler written in Kite and
+  # the differential tests compare it with the Rust implementation.
+  bootstrap:
+    name: bootstrap (stage0 -> stage1 -> differential tests)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: archive/rust-stage0
+      - run: sudo apt-get update && sudo apt-get install -y clang
+      - run: ./build.sh test
