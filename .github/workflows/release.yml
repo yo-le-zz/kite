@@ -1,6 +1,7 @@
 name: release
 # Builds the release files on native runners and attaches them to the GitHub
-# release of a v* tag. Uses the stable Rust compiler until the bootstrap is complete.
+# release of a v* tag. Uses the stable Rust toolchain (the GUI installer's dependencies need Rust >= 1.86;
+# ci.yml keeps the compiler itself pinned for fmt/clippy).
 on:
   push:
     tags: ["v*"]
@@ -16,8 +17,8 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
-      - run: sudo apt-get update && sudo apt-get install -y clang
+      - uses: dtolnay/rust-toolchain@stable
+      - run: sudo apt-get update && sudo apt-get install -y clang pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
       - run: scripts/package-release.sh --targets ${{ matrix.short }}
       - uses: actions/upload-artifact@v4
         with: { name: "release-${{ matrix.short }}", path: dist/release/*.* }
@@ -31,7 +32,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@stable
       - name: build and zip
         shell: pwsh
         run: |
@@ -43,6 +44,7 @@ jobs:
           Copy-Item ../../LICENSE ../../stage/
           Compress-Archive -Path ../../stage/* -DestinationPath "../../dist/release/kite-$v-${{ matrix.short }}.zip"
       - name: build and zip the GUI installer
+        continue-on-error: true   # the Kite archive is published even if the GUI installer fails
         shell: pwsh
         run: |
           Set-Location installer
@@ -63,7 +65,7 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@1.85.0
+      - uses: dtolnay/rust-toolchain@stable
       - name: build and tar
         run: |
           cd archive/rust-stage0 && cargo build --release

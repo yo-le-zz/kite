@@ -56,6 +56,7 @@ Kite features that will probably be needed while porting (add to stage0 first):
 - benchmarks tracked in CI (`kite bench`), compile-time budget
 
 ## 5. Release / distribution  **[release]**
+- Pin an exact newer Rust for the release workflow (currently `stable`, the installer needs >= 1.86) and add `rust-version` to both crates
 - Run the GitHub workflows once for real (`ci.yml`, `release.yml`, `build-installer-macos.yml`) -- they are untested
 - `windows-arm64` needs real MSVC (not buildable with `cross`); GUI installer for windows-arm64 blocked by `ring`
 - GUI installer (`installer/`): switch it to the new release asset names + `checksums.txt` verification, `.deb`

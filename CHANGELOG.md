@@ -32,3 +32,4 @@
 - Website refreshed for 0.3.0; CI updated for the new layout and a bootstrap job added.
 - Fix: the Rust crate is self-contained again (own copy of the prelude), so `cross`/Docker builds work; `package-release.sh` now fails clearly when no target could be built.
 - Fix: Windows zip packaging with an absolute --output-dir; partial cross-builds no longer reported as total failure.
+- Fix: release workflow uses the stable Rust toolchain (the GUI installer's dependencies require Rust >= 1.86).
