@@ -33,3 +33,5 @@
 - Fix: the Rust crate is self-contained again (own copy of the prelude), so `cross`/Docker builds work; `package-release.sh` now fails clearly when no target could be built.
 - Fix: Windows zip packaging with an absolute --output-dir; partial cross-builds no longer reported as total failure.
 - Fix: release workflow uses the stable Rust toolchain (the GUI installer's dependencies require Rust >= 1.86).
+- `.rpm` packages (x86_64, aarch64) built by `package-release.sh`; installer option `--rpm`.
+- Release workflow: the retired `macos-13` Intel runner (which never started) is replaced by one macOS job that builds both architectures; job timeouts; publish no longer waits on blocked jobs.

@@ -8,6 +8,7 @@ Readable like Python, fast like C, with a pinch of Rust-style safety. Version 0.
 ```
 curl -fsSL https://kite-lang.pages.dev/install.sh | sh                 # Linux
 curl -fsSL https://kite-lang.pages.dev/install.sh | sh -s -- --deb     # Debian/Ubuntu (.deb)
+curl -fsSL https://kite-lang.pages.dev/install.sh | sh -s -- --rpm     # Fedora/RHEL/openSUSE (.rpm)
 curl -fsSL https://kite-lang.pages.dev/install-macos.sh | sh           # macOS
 irm https://kite-lang.pages.dev/install.ps1 | iex                      # Windows (PowerShell)
 ```
@@ -34,5 +35,5 @@ Kite needs `clang` to produce native executables.
 
 ## Releases
 `scripts/package-release.sh` builds the Linux and Windows (x64, arm64) archives, the `.deb`
-packages and `checksums.txt` into `dist/release/`. It packages the stable Rust compiler until the
+packages, the `.rpm` packages and `checksums.txt` into `dist/release/`. It packages the stable Rust compiler until the
 bootstrap is complete (`compiler/BOOTSTRAPPED`), then the self-hosted one.

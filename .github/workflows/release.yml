@@ -9,6 +9,7 @@ on:
 
 jobs:
   linux:
+    timeout-minutes: 45
     strategy:
       matrix:
         include:
@@ -18,12 +19,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - run: sudo apt-get update && sudo apt-get install -y clang pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
+      - run: sudo apt-get update && sudo apt-get install -y clang rpm pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcursor-dev libxi-dev libxrandr-dev libgl1-mesa-dev
       - run: scripts/package-release.sh --targets ${{ matrix.short }}
       - uses: actions/upload-artifact@v4
         with: { name: "release-${{ matrix.short }}", path: dist/release/*.* }
 
   windows:
+    timeout-minutes: 45
     strategy:
       matrix:
         include:
@@ -56,30 +58,34 @@ jobs:
       - uses: actions/upload-artifact@v4
         with: { name: "release-${{ matrix.short }}", path: dist/release/*.zip }
 
+  # macOS: a single job on the arm64 runner builds both architectures
+  # (the Intel runner `macos-13` has been retired by GitHub and never starts).
   macos:
-    strategy:
-      matrix:
-        include:
-          - { os: macos-13,     short: macos-x64 }
-          - { os: macos-latest, short: macos-arm64 }
-    runs-on: ${{ matrix.os }}
+    runs-on: macos-latest
+    timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@stable
-      - name: build and tar
+        with: { targets: "x86_64-apple-darwin,aarch64-apple-darwin" }
+      - name: build and tar (arm64 + x64)
         run: |
-          cd archive/rust-stage0 && cargo build --release
+          cd archive/rust-stage0
           v=$(sed -n 's/^version *= *"\(.*\)"/\1/p' Cargo.toml | head -1)
-          mkdir -p ../../dist/release stage/kite-$v-${{ matrix.short }}
-          cp target/release/kite stage/kite-$v-${{ matrix.short }}/
-          cp ../../LICENSE stage/kite-$v-${{ matrix.short }}/
-          tar -C stage -czf ../../dist/release/kite-$v-${{ matrix.short }}.tar.gz kite-$v-${{ matrix.short }}
+          mkdir -p ../../dist/release
+          for pair in "macos-arm64 aarch64-apple-darwin" "macos-x64 x86_64-apple-darwin"; do
+            set -- $pair; short=$1; triple=$2
+            cargo build --release --target $triple
+            d=stage/kite-$v-$short; mkdir -p $d
+            cp target/$triple/release/kite $d/; cp ../../LICENSE $d/
+            tar -C stage -czf ../../dist/release/kite-$v-$short.tar.gz kite-$v-$short
+          done
       - uses: actions/upload-artifact@v4
-        with: { name: "release-${{ matrix.short }}", path: dist/release/*.tar.gz }
+        with: { name: "release-macos", path: dist/release/*.tar.gz }
 
   publish:
     needs: [linux, windows, macos]
-    if: startsWith(github.ref, 'refs/tags/v')
+    if: ${{ !cancelled() && startsWith(github.ref, 'refs/tags/v') }}
+    timeout-minutes: 15
     runs-on: ubuntu-latest
     permissions: { contents: write }
     steps:

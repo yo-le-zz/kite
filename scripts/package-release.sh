@@ -4,6 +4,7 @@
 #
 #   dist/release/kite-<ver>-linux-x64.tar.gz      kite_<ver>_amd64.deb
 #   dist/release/kite-<ver>-linux-arm64.tar.gz    kite_<ver>_arm64.deb
+#                                                 kite-<ver>-1.x86_64.rpm  kite-<ver>-1.aarch64.rpm
 #   dist/release/kite-<ver>-windows-x64.zip       dist/release/kite-<ver>-windows-arm64.zip
 #   dist/release/checksums.txt
 #
@@ -11,7 +12,7 @@
 #   scripts/package-release.sh                  all targets that can be built here
 #   scripts/package-release.sh --targets linux-x64,windows-x64
 #   scripts/package-release.sh --compiler rust|kite|auto
-#   scripts/package-release.sh --no-deb
+#   scripts/package-release.sh --no-deb --no-rpm
 #   scripts/package-release.sh --no-installer     skip the GUI installer (installer/)
 #
 # --compiler selects which `kite` goes into the packages:
@@ -29,12 +30,14 @@ OUT="$ROOT/dist/release"
 COMPILER=auto
 TARGETS=linux-x64,linux-arm64,windows-x64,windows-arm64
 DEB=1
+RPM=1
 INSTALLER=1
 while [ $# -gt 0 ]; do
   case "$1" in
     --compiler) COMPILER=$2; shift 2 ;;
     --targets)  TARGETS=$2;  shift 2 ;;
     --no-deb)   DEB=0; shift ;;
+    --no-rpm)   RPM=0; shift ;;
     --no-installer) INSTALLER=0; shift ;;
     -h|--help)  sed -n '2,24p' "$0"; exit 0 ;;
     *) echo "unknown option: $1" >&2; exit 2 ;;
@@ -96,6 +99,55 @@ CTRL
   rm -rf "$tmp"
   echo "   -> kite_${VERSION}_${arch}.deb"
 }
+# .rpm packages (Fedora / RHEL / openSUSE) built with rpmbuild from the same binary
+make_rpm() {
+  local short=$1 rarch=$2
+  local tarball="$OUT/kite-${VERSION}-${short}.tar.gz"
+  [ -f "$tarball" ] || { echo "   no $short archive, skipping its .rpm"; return 0; }
+  command -v rpmbuild >/dev/null || { echo "   rpmbuild missing (apt install rpm / dnf install rpm-build), skipping .rpm"; return 0; }
+  local tmp; tmp=$(mktemp -d)
+  mkdir -p "$tmp/x" "$tmp/top/"{BUILD,RPMS,SOURCES,SPECS,SRPMS}
+  tar -xzf "$tarball" -C "$tmp/x"
+  local bin; bin=$(find "$tmp/x" -type f -name kite | head -1)
+  cat > "$tmp/top/SPECS/kite.spec" <<SPEC
+Name:           kite
+Version:        $VERSION
+Release:        1
+Summary:        The Kite programming language
+License:        MIT
+URL:            https://github.com/yo-le-zz/Kite
+Requires:       clang
+AutoReqProv:    no
+%global debug_package %{nil}
+%global _build_id_links none
+%global __os_install_post %{nil}
+%description
+Readable like Python, fast like C, with a pinch of Rust-style safety.
+Compiles through LLVM; needs clang to produce native executables.
+
+%install
+mkdir -p %{buildroot}/usr/bin %{buildroot}/usr/share/kite %{buildroot}/usr/share/doc/kite
+install -m 0755 $bin %{buildroot}/usr/bin/kite
+cp -r $ROOT/stdlib %{buildroot}/usr/share/kite/stdlib
+cp -r $ROOT/examples %{buildroot}/usr/share/kite/examples
+cp -r $ROOT/docs/. %{buildroot}/usr/share/doc/kite/
+
+%files
+/usr/bin/kite
+/usr/share/kite
+/usr/share/doc/kite
+SPEC
+  rpmbuild -bb --quiet --target "$rarch" --define "_topdir $tmp/top" "$tmp/top/SPECS/kite.spec" >/dev/null 2>"$tmp/rpm.err" \
+    || { echo "   rpmbuild failed:"; sed 's/^/     /' "$tmp/rpm.err"; rm -rf "$tmp"; return 0; }
+  cp "$tmp"/top/RPMS/*/kite-*.rpm "$OUT/"
+  rm -rf "$tmp"
+  echo "   -> kite-${VERSION}-1.${rarch}.rpm"
+}
+if [ "$RPM" = 1 ]; then
+  case ",$TARGETS," in *,linux-x64,*)   make_rpm linux-x64 x86_64 ;; esac
+  case ",$TARGETS," in *,linux-arm64,*) make_rpm linux-arm64 aarch64 ;; esac
+fi
+
 if [ "$DEB" = 1 ]; then
   case ",$TARGETS," in *,linux-x64,*)   make_deb linux-x64 amd64 ;; esac
   case ",$TARGETS," in *,linux-arm64,*) make_deb linux-arm64 arm64 ;; esac

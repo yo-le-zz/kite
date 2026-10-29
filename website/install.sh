@@ -4,16 +4,17 @@
 #   curl -fsSL https://kite-lang.pages.dev/install.sh | sh
 #   curl -fsSL https://kite-lang.pages.dev/install.sh | sh -s -- --version 0.3.0
 #   curl -fsSL https://kite-lang.pages.dev/install.sh | sh -s -- --deb        (Debian/Ubuntu: .deb via dpkg)
+#   curl -fsSL https://kite-lang.pages.dev/install.sh | sh -s -- --rpm        (Fedora/RHEL/openSUSE: .rpm via dnf)
 #   curl -fsSL https://kite-lang.pages.dev/install.sh | sh -s -- --uninstall
 #
-# Options:  --version X   --prefix DIR   --deb   --no-modify-path   --uninstall   --help
+# Options:  --version X   --prefix DIR   --deb   --rpm   --no-modify-path   --uninstall   --help
 # Env:      KITE_REPO (yo-le-zz/Kite)  KITE_VERSION  KITE_INSTALL_DIR ($HOME/.local/bin)
 set -eu
 
 REPO="${KITE_REPO:-yo-le-zz/Kite}"
 INSTALL_DIR="${KITE_INSTALL_DIR:-$HOME/.local/bin}"
 VERSION="${KITE_VERSION:-}"
-USE_DEB=0; MODIFY_PATH=1; UNINSTALL=0
+USE_DEB=0; USE_RPM=0; MODIFY_PATH=1; UNINSTALL=0
 
 if [ -t 1 ]; then B='\033[1m'; G='\033[32m'; R='\033[31m'; Y='\033[33m'; D='\033[2m'; Z='\033[0m'; else B=''; G=''; R=''; Y=''; D=''; Z=''; fi
 info() { printf '%b%s%b\n' "$D" "$1" "$Z"; }
@@ -26,6 +27,7 @@ while [ $# -gt 0 ]; do
     --version) VERSION="${2:?--version needs a value}"; shift 2 ;;
     --prefix)  INSTALL_DIR="${2:?--prefix needs a value}/bin"; shift 2 ;;
     --deb) USE_DEB=1; shift ;;
+    --rpm) USE_RPM=1; shift ;;
     --no-modify-path) MODIFY_PATH=0; shift ;;
     --uninstall) UNINSTALL=1; shift ;;
     -h|--help) sed -n '2,11p' "$0" 2>/dev/null | sed 's/^# \{0,1\}//'; exit 0 ;;
@@ -93,6 +95,18 @@ if [ "$USE_DEB" = 1 ]; then
   info "downloading $DEB"; fetch "$BASE/$DEB" "$TMP/$DEB" || die "download failed: $BASE/$DEB"
   verify "$TMP/$DEB" "$DEB"
   if [ "$(id -u)" = 0 ]; then dpkg -i "$TMP/$DEB"; else sudo dpkg -i "$TMP/$DEB" || sudo apt-get install -f -y; fi
+  ok "kite ${VERSION} installed system-wide (/usr/bin/kite)"; exit 0
+fi
+
+if [ "$USE_RPM" = 1 ]; then
+  case "$ARCH_LABEL" in x64) RPM_ARCH=x86_64 ;; arm64) RPM_ARCH=aarch64 ;; esac
+  RPM="kite-${VERSION}-1.${RPM_ARCH}.rpm"
+  info "downloading $RPM"; fetch "$BASE/$RPM" "$TMP/$RPM" || die "download failed: $BASE/$RPM"
+  verify "$TMP/$RPM" "$RPM"
+  if   command -v dnf    >/dev/null 2>&1; then SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo; $SUDO dnf install -y "$TMP/$RPM"
+  elif command -v zypper >/dev/null 2>&1; then SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo; $SUDO zypper --non-interactive install --allow-unsigned-rpm "$TMP/$RPM"
+  elif command -v rpm    >/dev/null 2>&1; then SUDO=""; [ "$(id -u)" = 0 ] || SUDO=sudo; $SUDO rpm -i "$TMP/$RPM"
+  else die "--rpm needs dnf, zypper or rpm"; fi
   ok "kite ${VERSION} installed system-wide (/usr/bin/kite)"; exit 0
 fi
 

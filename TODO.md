@@ -63,7 +63,7 @@ Kite features that will probably be needed while porting (add to stage0 first):
   and `.msi`/`winget` options, uninstall, offer to install clang; bump its version independently
 - `package-release.sh`: sign artifacts (minisign/GPG), reproducible builds, upload step, SBOM
 - Distribution channels: apt repository (signed), Homebrew tap, winget manifest, Scoop, AUR, Nix, Docker image
-- `.deb`: man page, shell completions, `kite` bash/zsh/fish completion files
+- `.deb`/`.rpm`: man page, shell completions, `kite` bash/zsh/fish completion files
 - website: real domain, docs pages, download table generated from the latest release, versioned docs
 - CI cache for the bootstrap, nightly job that runs `./build.sh test` and the differential tests
 
