@@ -111,6 +111,26 @@ if [ "$INSTALLER" = 1 ]; then
   ITARGETS="${ITARGETS#,}"
   if [ -n "$ITARGETS" ]; then
     echo "==> installer (GUI): $ITARGETS"
+    # The GUI installer's dependencies need Rust >= 1.86; use a newer toolchain when the active one is older.
+    rust_ok() { v=$(rustc --version 2>/dev/null | awk '{print $2}'); [ -n "$v" ] && [ "$(printf '%s\n1.86.0\n' "$v" | sort -V | head -1)" = "1.86.0" ]; }
+    if ! rust_ok; then
+      echo "   active rustc ($(rustc --version 2>/dev/null)) is older than 1.86: switching to the stable toolchain for the installer"
+      if command -v rustup >/dev/null 2>&1 && rustup toolchain install stable --profile minimal >/dev/null 2>&1; then
+        export RUSTUP_TOOLCHAIN=stable
+        for t in ${ITARGETS//,/ }; do
+          case "$t" in
+            linux-arm64) rustup target add aarch64-unknown-linux-gnu --toolchain stable >/dev/null 2>&1 || true ;;
+            linux-x64)   rustup target add x86_64-unknown-linux-gnu  --toolchain stable >/dev/null 2>&1 || true ;;
+            windows-x64) rustup target add x86_64-pc-windows-gnu     --toolchain stable >/dev/null 2>&1 || true ;;
+          esac
+        done
+      else
+        echo "   cannot get a newer Rust (no rustup): skipping the GUI installer" >&2
+        ITARGETS=""
+      fi
+    fi
+  fi
+  if [ -n "$ITARGETS" ]; then
     ITMP="$OUT/.installer"
     if "$ROOT/installer/build.sh" --targets "$ITARGETS" --output-dir "$ITMP"; then :; else
       echo "   (some installer targets were skipped, see above)"
