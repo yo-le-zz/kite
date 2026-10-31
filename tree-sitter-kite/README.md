@@ -43,3 +43,17 @@ couldn't make sense of that part of the file.
 ## License
 
 MIT -- see `LICENSE`.
+
+## Status (0.3.0)
+Covers the whole language: `class` (with inheritance and methods), `type`, `enum` with data variants, `match`/`case`,
+f-strings (`format_string` with `interpolation` nodes), default / named / variadic parameters, tuple unpacking,
+typed lists `[T]` and tuple types `(A, B)`, `ptr<T>`, `alloc`/`alloc_n`, `extern make`, `async`/`await`,
+compound assignment (`+=` ... `>>=`) and the bit operators.
+
+```
+npm install          # installs tree-sitter-cli
+npm run generate     # regenerates src/ (ABI 14, supported by Zed, Neovim and Helix)
+npm test             # 23 corpus tests in test/corpus
+```
+`queries/` holds `highlights.scm`, `brackets.scm`, `indents.scm`, `outline.scm`, `overrides.scm` and `tags.scm`.
+`samples/` contains real programs; CI requires each of them to parse without errors.

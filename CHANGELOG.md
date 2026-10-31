@@ -35,3 +35,5 @@
 - Fix: release workflow uses the stable Rust toolchain (the GUI installer's dependencies require Rust >= 1.86).
 - `.rpm` packages (x86_64, aarch64) built by `package-release.sh`; installer option `--rpm`.
 - Release workflow: the retired `macos-13` Intel runner (which never started) is replaced by one macOS job that builds both architectures; job timeouts; publish no longer waits on blocked jobs.
+- Editor support rewritten for Kite 0.3: tree-sitter grammar (classes, match/case, f-strings, defaults, named/variadic params, tuples, ptr<T>, compound operators), 23 corpus tests; Zed queries (highlights, brackets, indents, outline, overrides); new VS Code extension (TextMate grammar, snippets, language configuration, tests, .vsix).
+- `linguist/`: everything for a GitHub Linguist pull request (entry, real-world samples, apply/validate scripts, PR text, grammar-repo export); verified against Linguist's own sorting, sample and classifier tests.

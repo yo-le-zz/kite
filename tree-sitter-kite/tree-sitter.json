@@ -6,17 +6,22 @@
       "camelcase": "Kite",
       "scope": "source.kite",
       "path": ".",
-      "file-types": ["ki"],
+      "file-types": [
+        "ki"
+      ],
       "highlights": "queries/highlights.scm",
-      "injection-regex": "^kite$"
+      "injection-regex": "^kite$",
+      "tags": "queries/tags.scm"
     }
   ],
   "metadata": {
-    "version": "0.1.4",
+    "version": "0.3.0",
     "license": "MIT",
     "description": "Tree-sitter grammar for the Kite programming language",
     "authors": [
-      { "name": "yo-le-zz" }
+      {
+        "name": "yo-le-zz"
+      }
     ],
     "links": {
       "repository": "https://github.com/yo-le-zz/tree-sitter-kite"

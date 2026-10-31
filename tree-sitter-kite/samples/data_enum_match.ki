@@ -1,0 +1,18 @@
+enum Shape:
+    Circle(r: int)
+    Rect(w: int, h: int)
+    Empty
+
+make area(s: Shape) -> int:
+    match s:
+        case Circle(r):
+            return 3 * r * r
+        case Rect(w, h):
+            return w * h
+        else:
+            return 0
+
+make main():
+    print(area(Shape.Circle(2)))
+    print(area(Shape.Rect(3, 4)))
+    print(area(Shape.Empty))

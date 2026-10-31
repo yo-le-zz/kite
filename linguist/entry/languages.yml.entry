@@ -1,0 +1,8 @@
+Kite:
+  type: programming
+  color: "#8B5CF6"
+  extensions:
+  - ".ki"
+  tm_scope: source.kite
+  ace_mode: text
+  language_id: 1007285693

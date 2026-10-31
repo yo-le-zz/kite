@@ -1,0 +1,19 @@
+name: ci
+on: [push, pull_request]
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - run: npm install --no-audit --no-fund
+      - run: npx tree-sitter generate --abi 14 && git diff --exit-code src/ || (echo "src/ is out of date: run npm run generate" && exit 1)
+      - run: npx tree-sitter test
+      - name: every .ki sample must parse without errors
+        run: |
+          status=0
+          for f in $(find samples -name '*.ki' 2>/dev/null); do
+            npx tree-sitter parse "$f" 2>&1 | grep -q "ERROR\|MISSING" && { echo "parse error: $f"; status=1; }
+          done
+          exit $status

@@ -1,36 +1,28 @@
-; Kite syntax highlighting queries.
-;
-; Capture names follow the conventions shared across editors built on
-; tree-sitter (Zed, Neovim, Helix, ...): @keyword, @function, @type,
-; @string, @number, @comment, etc. Each editor's theme maps these names
-; to actual colors, so this file intentionally does not hard-code any.
-;
-; Patterns are ordered general -> specific: when two patterns capture
-; the same node, the *later* one wins, so broad catch-alls (like the
-; generic `(identifier) @variable` below) come first and specific
-; overrides (function names, type names, enum variants, ...) come after.
+; Syntax highlighting for Kite 0.3 (works in tree-sitter, Zed, Neovim, Helix).
 
-; ---- generic identifier fallback ----------------------------------------
-
-(identifier) @variable
-
-; ---- literals -----------------------------------------------------------
-
-(integer) @number
-(float) @number
-(boolean) @constant.builtin.boolean
-(string) @string
+; ---- comments ---------------------------------------------------------------
 (comment) @comment
 
-; ---- keywords -----------------------------------------------------------
-
+; ---- keywords ---------------------------------------------------------------
 [
   "make"
+  "extern"
+  "async"
+  "type"
+  "class"
+  "enum"
+  "use"
+  "from"
+  "import"
+] @keyword
+
+[
   "return"
   "if"
   "orif"
   "else"
   "until"
+  "while"
   "infinit"
   "for"
   "to"
@@ -39,83 +31,92 @@
   "failed"
   "finally"
   "thread"
-  "async"
+  "match"
+  "case"
   "await"
-  "type"
-  "enum"
-  "use"
-  "from"
-  "import"
 ] @keyword
 
-(pointer_type "ptr" @type.builtin)
-(null_literal) @constant.builtin
+[
+  "and"
+  "or"
+  "not"
+] @keyword
 
 (break_statement) @keyword
 (continue_statement) @keyword
-["and" "or" "not"] @keyword.operator
 
-; ---- operators & punctuation ----------------------------------------------
+; ---- literals -----------------------------------------------------------------
+(integer) @number
+(float) @number
+(boolean) @boolean
+(null_literal) @constant
 
-[
-  "+"
-  "-"
-  "*"
-  "/"
-  "%"
-  "=="
-  "!="
-  "<"
-  ">"
-  "<="
-  ">="
-  "="
-  "->"
-  "&"
-] @operator
+(string) @string
+(format_string) @string
+(string_content) @string
+(escape_sequence) @string.escape
+(interpolation
+  "}" @punctuation.special)
+(interpolation
+  (_) @embedded)
 
-["." ":" ","] @punctuation.delimiter
-["(" ")" "[" "]" "{" "}"] @punctuation.bracket
-
-; ---- types ----------------------------------------------------------------
-
-(primitive_type) @type.builtin
+; ---- types --------------------------------------------------------------------
+(primitive_type) @type
+(type_identifier) @type
+(pointer_type "ptr" @type)
 (struct_definition name: (identifier) @type)
+(class_definition name: (identifier) @type)
+(class_definition base: (identifier) @type)
 (enum_definition name: (identifier) @type)
-(parameter type: (identifier) @type)
-(struct_field type: (identifier) @type)
-(function_definition return_type: (identifier) @type)
 
-; ---- fields / properties / constants ---------------------------------------
+; ---- enum variants --------------------------------------------------------------
+(enum_variant name: (identifier) @variant)
+(case_clause variant: (identifier) @variant)
 
-(struct_field name: (identifier) @property)
-(enum_variant (identifier) @constant)
+; ---- functions ------------------------------------------------------------------
+(function_definition name: (identifier) @function)
+(call_expression function: (identifier) @function)
+(method_call_expression method: (identifier) @function)
+
+; Constructors: calling a capitalised name (`Counter()`, `Shape.Circle(2)`).
+(call_expression
+  function: (identifier) @constructor
+  (#match? @constructor "^[A-Z]"))
+(method_call_expression
+  method: (identifier) @constructor
+  (#match? @constructor "^[A-Z]"))
+
+; Built-in functions.
+(call_expression
+  function: (identifier) @function
+  (#any-of? @function
+    "print" "len" "str" "append" "pop" "remove" "insert" "clear" "exit"
+    "char_at" "substr" "read_file" "write_file" "arg" "arg_count" "free"))
+
+(alloc_expression function: _ @function)
+
+; ---- variables and fields ---------------------------------------------------------
+(parameter name: (identifier) @variable)
+(named_argument name: (identifier) @variable)
 (field_access field: (identifier) @property)
-(dict_entry key: (string) @property)
+(struct_field name: (identifier) @property)
+(variant_field name: (identifier) @property)
 
-; `Color.Red` -- capital-letter field access on a bare identifier reads
-; as an enum variant reference far more often than a struct field.
-(field_access
-  object: (expression (identifier) @type)
-  field: (identifier) @constant
+((identifier) @variable.special
+  (#eq? @variable.special "self"))
+
+; Capitalised bare identifiers are types/enums (`Shape.Circle`, `Color.Red`).
+((identifier) @type
   (#match? @type "^[A-Z]"))
 
-; ---- functions --------------------------------------------------------------
+; ---- operators and punctuation ---------------------------------------------------
+[
+  "+" "-" "*" "/" "%"
+  "==" "!=" "<" ">" "<=" ">="
+  "=" "&" "|" "^" "~" "<<" ">>"
+  "->"
+] @operator
+(augmented_operator) @operator
 
-(function_definition name: (identifier) @function)
-(call_expression function: (identifier) @function.call)
-
-; Builtins that exist without a `make` definition anywhere.
-((identifier) @function.builtin
-  (#match? @function.builtin "^(print|append|len|char_at|substr|read_file|write_file|arg_count|arg|alloc|alloc_n|free)$"))
-
-; ---- parameters / loop variables -------------------------------------------
-
-(parameter name: (identifier) @variable.parameter)
-(for_range_statement variable: (identifier) @variable.parameter)
-(for_each_statement variable: (identifier) @variable.parameter)
-
-; ---- imports ----------------------------------------------------------------
-
-(use_import path: (dotted_path (identifier) @module))
-(from_import path: (dotted_path (identifier) @module))
+[ "(" ")" "[" "]" "{" "}" ] @punctuation.bracket
+[ "," ":" "." ] @punctuation.delimiter

@@ -1,0 +1,4 @@
+make main():
+    print("apple" < "banana")
+    print("b" >= "a")
+    print("a" > "b")

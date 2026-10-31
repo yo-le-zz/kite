@@ -30,6 +30,7 @@ Kite needs `clang` to produce native executables.
 | `docs/` | `language-0.2.md`, `bootstrap.md`, `architecture.md`, ... |
 | `examples/` | sample programs (`stable/`, `lang5/` have recorded outputs) |
 | `scripts/` | `package-release.sh`, `cross-build.sh`, `difftest.sh` |
+| `editors/`, `tree-sitter-kite/`, `linguist/` | VS Code + Zed + tree-sitter support, GitHub Linguist PR material (`docs/editors.md`) |
 | `installer/` | the GUI installer (Rust + iced) |
 | `website/` | kite-lang.pages.dev (install scripts + landing page) |
 

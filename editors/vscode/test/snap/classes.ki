@@ -1,0 +1,31 @@
+class Animal:
+    name: string
+    make init(self, name: string):
+        self.name = name
+    make speak(self) -> string:
+        return "..."
+    make intro(self) -> string:
+        return f"{self.name} says {self.speak()}"
+
+class Dog(Animal):
+    make speak(self) -> string:
+        return "woof"
+
+class Puppy(Dog):
+    make speak(self) -> string:
+        return "yip"
+
+class Cat(Animal):
+    make speak(self) -> string:
+        return "meow"
+
+make show(a: Animal):
+    print(a.intro())
+
+make main():
+    show(Animal("generic"))
+    show(Dog("Rex"))
+    show(Cat("Tom"))
+    show(Puppy("Bit"))
+    p = Puppy("Z")
+    print(p.speak())

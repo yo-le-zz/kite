@@ -43,9 +43,10 @@ Kite features that will probably be needed while porting (add to stage0 first):
 ## 3. Tooling  **[tools]**
 - `kite fmt`, `kite doc`, `kite test` (test runner), `kite add`/dependency fetching, lock file
 - language server (LSP) built on the Kite parser; reuse `kitec ast`
-- update **tree-sitter-kite** and the **Zed extension** (`editors/zed`) for: `class`, `match/case`, f-strings,
-  default/named/variadic params, `*args`, typed lists `[T]`, tuple types, `x, y = ...`, `ptr<T>` auto-deref
-- editor support for VS Code / Neovim; syntax highlighting on the website
+- [x] tree-sitter grammar, Zed extension and VS Code extension updated for Kite 0.3 (see `docs/editors.md`)
+- publish: tree-sitter-kite repo, Zed extension (PR to zed-industries/extensions), VS Code Marketplace + Open VSX (`vsce publish`, needs a publisher token)
+- Linguist PR (`linguist/`) once there are >= ~2000 indexed `.ki` files in many repositories
+- syntax highlighting on the website; Vim/Neovim/Helix queries upstreaming
 - REPL / playground on the website (compile to WASM or server-side)
 
 ## 4. Tests  **[tools]**

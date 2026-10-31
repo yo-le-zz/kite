@@ -219,3 +219,30 @@ jobs:
           workspaces: archive/rust-stage0
       - run: sudo apt-get update && sudo apt-get install -y clang
       - run: ./build.sh test
+
+  # Editor support: tree-sitter grammar (Zed, Neovim, Helix), TextMate grammar (VS Code, GitHub Linguist).
+  editors:
+    name: editors (tree-sitter + VS Code grammar)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 22 }
+      - name: tree-sitter grammar
+        working-directory: tree-sitter-kite
+        run: |
+          npm install --no-audit --no-fund
+          npx tree-sitter generate --abi 14
+          git diff --exit-code src/ || (echo "src/ is out of date: run npm run generate" && exit 1)
+          npx tree-sitter test
+          for f in $(find ../examples ../stdlib ../compiler/src -name '*.ki'); do
+            npx tree-sitter parse "$f" 2>&1 | grep -q "ERROR\|MISSING" && { echo "parse error: $f"; exit 1; } || true
+          done
+      - name: VS Code grammar and extension
+        working-directory: editors/vscode
+        run: |
+          npm install --no-audit --no-fund
+          npm test
+          npm run package
+      - name: Linguist entry
+        run: python3 linguist/validate.py

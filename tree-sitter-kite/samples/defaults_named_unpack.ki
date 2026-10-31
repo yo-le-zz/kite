@@ -1,0 +1,11 @@
+make greet(name: string, greeting: string = "Hello", times: int = 1) -> string:
+    return f"{greeting}, {name} x{times}"
+
+make main():
+    print(greet("A"))
+    print(greet("B", times=3))
+    print(greet(name="C", greeting="Yo"))
+    t = (1, "x")
+    a, b = t
+    print(a)
+    print(b)

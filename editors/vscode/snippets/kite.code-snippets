@@ -1,0 +1,177 @@
+{
+  "make (function)": {
+    "prefix": "make",
+    "body": [
+      "make ${1:name}(${2}) -> ${3:int}:",
+      "\t${0:return 0}"
+    ],
+    "description": "Function"
+  },
+  "make main": {
+    "prefix": "main",
+    "body": [
+      "make main():",
+      "\t${0:print(\"Hello, Kite!\")}"
+    ],
+    "description": "Entry point"
+  },
+  "class": {
+    "prefix": "class",
+    "body": [
+      "class ${1:Name}:",
+      "\t${2:field}: ${3:int}",
+      "",
+      "\tmake init(self, ${2:field}: ${3:int}):",
+      "\t\tself.${2:field} = ${2:field}",
+      "",
+      "\tmake ${4:method}(self):",
+      "\t\t${0:return}"
+    ],
+    "description": "Class with constructor"
+  },
+  "class (inherit)": {
+    "prefix": "classi",
+    "body": [
+      "class ${1:Child}(${2:Base}):",
+      "\tmake ${3:method}(self):",
+      "\t\t${0:return}"
+    ],
+    "description": "Subclass"
+  },
+  "type (struct)": {
+    "prefix": "type",
+    "body": [
+      "type ${1:Name}:",
+      "\t${2:field}: ${3:int}"
+    ],
+    "description": "Struct"
+  },
+  "enum (plain)": {
+    "prefix": "enum",
+    "body": [
+      "enum ${1:Name}:",
+      "\t${2:First}",
+      "\t${3:Second}"
+    ],
+    "description": "Enum of tags"
+  },
+  "enum (data)": {
+    "prefix": "enumd",
+    "body": [
+      "enum ${1:Shape}:",
+      "\t${2:Circle}(${3:r}: int)",
+      "\t${4:Empty}"
+    ],
+    "description": "Enum with data"
+  },
+  "match": {
+    "prefix": "match",
+    "body": [
+      "match ${1:value}:",
+      "\tcase ${2:Variant}(${3:x}):",
+      "\t\t${4:pass}",
+      "\telse:",
+      "\t\t${0:pass}"
+    ],
+    "description": "match / case"
+  },
+  "if": {
+    "prefix": "if",
+    "body": [
+      "if ${1:condition}:",
+      "\t${0:pass}"
+    ],
+    "description": "if"
+  },
+  "ifelse": {
+    "prefix": "ifelse",
+    "body": [
+      "if ${1:condition}:",
+      "\t${2:pass}",
+      "orif ${3:other}:",
+      "\t${4:pass}",
+      "else:",
+      "\t${0:pass}"
+    ],
+    "description": "if / orif / else"
+  },
+  "while": {
+    "prefix": "while",
+    "body": [
+      "while ${1:condition}:",
+      "\t${0:pass}"
+    ],
+    "description": "while loop"
+  },
+  "until": {
+    "prefix": "until",
+    "body": [
+      "until ${1:condition}:",
+      "\t${0:pass}"
+    ],
+    "description": "until loop (stops when the condition becomes true)"
+  },
+  "for range": {
+    "prefix": "forr",
+    "body": [
+      "for ${1:i} = ${2:0} to ${3:n}:",
+      "\t${0:pass}"
+    ],
+    "description": "Counting loop (end exclusive)"
+  },
+  "for each": {
+    "prefix": "for",
+    "body": [
+      "for ${1:item} in ${2:items}:",
+      "\t${0:pass}"
+    ],
+    "description": "for each"
+  },
+  "try": {
+    "prefix": "try",
+    "body": [
+      "try:",
+      "\t${1:pass}",
+      "failed ${2:err}:",
+      "\t${3:pass}",
+      "finally:",
+      "\t${0:pass}"
+    ],
+    "description": "try / failed / finally"
+  },
+  "print f-string": {
+    "prefix": "pf",
+    "body": [
+      "print(f\"${1:text} {${2:value}}\")"
+    ],
+    "description": "print with an f-string"
+  },
+  "extern": {
+    "prefix": "extern",
+    "body": [
+      "extern make ${1:name}(${2:s}: string) -> ${3:int}"
+    ],
+    "description": "C function declaration"
+  },
+  "use": {
+    "prefix": "use",
+    "body": [
+      "use ${1:module}"
+    ],
+    "description": "Import a module"
+  },
+  "from import": {
+    "prefix": "from",
+    "body": [
+      "from ${1:module} import ${2:name}"
+    ],
+    "description": "Import names"
+  },
+  "alloc": {
+    "prefix": "alloc",
+    "body": [
+      "${1:p} = alloc(${2:Type})"
+    ],
+    "description": "Heap allocation"
+  }
+}
