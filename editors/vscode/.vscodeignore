@@ -1,6 +1,0 @@
-.vscode/**
-test/**
-**/*.snap
-node_modules/**
-*.vsix
-.gitignore
